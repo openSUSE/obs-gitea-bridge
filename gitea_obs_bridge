@@ -46,10 +46,12 @@ use strict;
 my $port = 9998;
 my $proto = 'http';
 
+my $obsurl = "https://api.opensuse.org/public/source";
 my $header = "X-SCM-BRIDGE-COOKIE: not_configured";
 eval {
   use config;
   $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie";
+  $obsurl = $config::obsurl;
 };
 
 sub repositoryevent {
@@ -69,7 +71,7 @@ sub repositoryevent {
 	      'scmrepository' => $batch->{'repository'}->{'clone_url'},
 	      'scmbranch'     => $branch };
   my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch');
-  my $h = BSRPC::rpc({'uri' => "https://api.opensuse.org/public/source",
+  my $h = BSRPC::rpc({'uri' => $obsurl,
 	              'request' => 'POST',
 	              'headers' => [$header]}, undef, @args);
 
