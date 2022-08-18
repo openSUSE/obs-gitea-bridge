@@ -1,0 +1,6 @@
+
+package config;
+
+our $shared_cookie = 'my_private_cookie_string';
+
+1;

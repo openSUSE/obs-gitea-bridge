@@ -1,0 +1,116 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2022 Adrian Schroeter, SUSE LLC
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program (see the file COPYING); if not, write to the
+# Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+#
+################################################################
+#
+# OBS Git LFS provider
+# 
+# This service answers git LFS requests and let OBS deliver the files
+# based on a static database.
+#
+# This is only supposed to be used for converted sources from classic
+# OBS source repositories. This is not supposed to be used for sources
+# which are supposed to be actively maintained in git directly.
+#
+
+BEGIN {
+  my ($wd) = $0 =~ m-(.*)/- ;
+  $wd ||= '.';
+  unshift @INC,  "$wd";
+}
+
+use Data::Dumper;
+use JSON::XS ();
+
+use BSServer;
+use BSRPC ':https';
+use BSDispatch;
+
+use strict;
+
+my $port = 9998;
+my $proto = 'http';
+
+my $header = "X-SCM-BRIDGE-COOKIE: not_configured";
+eval {
+  use config;
+  $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie";
+};
+
+sub repositoryevent {
+  die("need event data as content\n") unless BSServer::have_content();
+  my $batch_json = BSServer::read_data(10000000);
+  my $batch = JSON::XS::decode_json($batch_json);
+
+  die("no ref given\n") unless $batch->{'ref'};
+  die("no repository given\n") unless $batch->{'repository'};
+  die("no clone repository given\n") unless $batch->{'repository'}->{'clone_url'};
+
+  my $branch = $batch->{'ref'};
+  $branch =~ s/.*\///;
+  print "Forward url $batch->{'repository'}->{'clone_url'} for branch $branch\n";
+
+  my $cgi = { 'cmd'           => 'triggerscmsync',
+	      'scmrepository' => $batch->{'repository'}->{'clone_url'},
+	      'scmbranch'     => $branch };
+  my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch');
+  my $h = BSRPC::rpc({'uri' => "https://api.opensuse.org/public/source",
+	              'request' => 'POST',
+	              'headers' => [$header]}, undef, @args);
+
+  my $resp = {
+    answer => 'thank you',
+  };
+  #  print Dumper(JSON::XS::encode_json($resp));
+  return (JSON::XS::encode_json($resp), 'Content-Type: application/json');
+}
+
+sub hello {
+  return ("{\"message\": \"OBS git LFS Server\"}\n", 'Content-Type: application/json');
+}
+
+sub errorreply {
+  my ($err, $code, $tag, @hdrs) = @_;
+  $err = JSON::XS::encode_json({'message' => $tag});
+  BSServer::reply("$err\n", "Status: $code $tag", 'Content-Type: application/json', @hdrs);
+}
+
+sub dispatch {
+  my ($conf, $req) = @_;
+  return BSDispatch::dispatch($conf, $req);
+}
+
+# define server
+my $dispatches = [
+  '/' => \&hello,
+  'POST:/repositoryevent' => \&repositoryevent,
+];
+
+my $conf = {
+  'port' => $port,
+  'proto' => $proto,
+  'dispatch' => \&dispatch,
+  'dispatches' => $dispatches,
+  'errorreply' => \&errorreply,
+  'setkeepalive' => 1,
+  'maxchild' => 20,
+};
+
+BSDispatch::compile($conf);
+BSServer::serveropen($conf->{'port'});
+BSServer::server($conf);
