@@ -70,7 +70,7 @@ sub repositoryevent {
   my $cgi = { 'cmd'           => 'triggerscmsync',
 	      'scmrepository' => $batch->{'repository'}->{'clone_url'},
 	      'scmbranch'     => $branch };
-  $cgi->{'isdefaultbranch'} = undef if $batch->{'repository'}->{'default_branch'} eq $branch;
+  $cgi->{'isdefaultbranch'} = 1 if $batch->{'repository'}->{'default_branch'} eq $branch;
   my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch', 'isdefaultbranch');
   my $h = BSRPC::rpc({'uri' => $obsurl,
 	              'request' => 'POST',
