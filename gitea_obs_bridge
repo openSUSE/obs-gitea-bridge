@@ -70,7 +70,7 @@ sub repositoryresults {
                       $BSXML::resultlist,
                      @args);
 
-  my $html = '<table> <tr> <th>Project/Package</th> <th>Repository</th> <th>Architecture</th> <th>Result</th> </tr>';
+  my $html = '<table> <tr> <th>Project</th><th>Package</th> <th>Repository</th> <th>Architecture</th> <th>Result</th> </tr>';
   my $lastproject = '';
   my $lastpackage = '';
   my $lastrepo = '';
@@ -82,7 +82,7 @@ sub repositoryresults {
     my $arch    = $result->{'arch'};
     my $code    = $result->{'status'}[0]->{'code'} || 'unknown';
 
-    $project = '' if $project eq $lastproject && $package eq $lastpackage;
+    $project = '' if $project eq $lastproject;
     $package = '' if $package eq $lastpackage;
     $repo = ''    if $repo eq $lastrepo;
     $count = $count + 1;
@@ -100,9 +100,9 @@ sub repositoryresults {
 
     $html .= "<tr><td>$project</td><td>$package</td> <td>$repo</td> <td>$arch</td> <td bgcolor=\"$bgcolor\"><font color=\"$color\">$code</font></td> </tr>\n";
 
-    $lastproject = $project;
-    $lastpackage = $package;
-    $lastrepo    = $repo;
+    $lastproject = $project unless $project eq '' ;
+    $lastpackage = $package unless $package eq '' ;
+    $lastrepo    = $repo    unless $repo eq '';
     last if $count > 10;
   };
   $html .= '</table>';
