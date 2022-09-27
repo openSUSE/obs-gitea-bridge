@@ -70,20 +70,22 @@ sub repositoryresults {
                       $BSXML::resultlist,
                      @args);
 
-  my $html = '<table> <tr> <th>Project/Package</th> <th>Repository</th> <th>Architecture</th> <th>Result</th> </tr>\n';
+  my $html = '<table> <tr> <th>Project/Package</th> <th>Repository</th> <th>Architecture</th> <th>Result</th> </tr>';
   my $lastproject = '';
   my $lastpackage = '';
   my $lastrepo = '';
+  my $count = 0;
   for my $result (@{$r->{'result'} || []}) {
     my $project = $result->{'project'};
     my $package = $result->{'status'}[0]->{'package'} || undef;
     my $repo    = $result->{'repository'};
     my $arch    = $result->{'arch'};
-    my $code    = $result->{'status'}[0]->{'code'};
+    my $code    = $result->{'status'}[0]->{'code'} || 'unknown';
 
     $project = '' if $project eq $lastproject && $package eq $lastpackage;
     $package = '' if $package eq $lastpackage;
     $repo = ''    if $repo eq $lastrepo;
+    $count = $count + 1;
 
     my $bgcolor = "#fff";
     $bgcolor = "#bbb" if $code eq 'scheduled' || $code eq 'building' ||  $code eq 'finished' || $code eq 'blocked';
@@ -101,8 +103,10 @@ sub repositoryresults {
     $lastproject = $project;
     $lastpackage = $package;
     $lastrepo    = $repo;
+    last if $count > 10;
   };
   $html .= '</table>';
+  $html .= '<p>.... uncollapsing not implemeted...</p>' if $count > 10;
   return $html;
 }
 
@@ -153,7 +157,7 @@ sub dispatch {
 # define server
 my $dispatches = [
   '/' => \&hello,
-  'GET:/repositoryresults scmrepository:? scmbranch:? code:? lastbuild:bool? multibuild:bool? locallink:bool?' => \&repositoryresults,
+  'GET:/repositoryresults scmrepository:? scmbranch:? code:? lastbuild:? multibuild:? locallink:?' => \&repositoryresults,
   'POST:/repositoryevent' => \&repositoryevent,
 ];
 
