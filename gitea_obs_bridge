@@ -40,19 +40,71 @@ use JSON::XS ();
 use BSServer;
 use BSRPC ':https';
 use BSDispatch;
+use BSXML;
 
 use strict;
 
 my $port = 9998;
 my $proto = 'http';
 
-my $obsurl = "https://api.opensuse.org/public/source";
+my $obsurl = "https://api.opensuse.org/public";
 my $header = "X-SCM-BRIDGE-COOKIE: not_configured";
 eval {
   use config;
   $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie";
   $obsurl = $config::obsurl;
 };
+
+sub repositoryresults {
+  my ($cgi) = @_;
+
+  my $scmrepo = $cgi->{'scmrepository'};
+  my $scmbranch = $cgi->{'scmbranch'};
+
+  my $query = {'scmrepository' => $scmrepo,
+	       'scmbranch'     => $scmbranch };
+  my @args = BSRPC::args($query, 'scmrepository', 'scmbranch');
+  my $r = BSRPC::rpc({'uri' => "$obsurl/build/_result",
+	              'request' => 'GET',
+	              'headers' => [$header]},
+                      $BSXML::resultlist,
+                     @args);
+
+  my $html = '<table> <tr> <th>Project/Package</th> <th>Repository</th> <th>Architecture</th> <th>Result</th> </tr>\n';
+  my $lastproject = '';
+  my $lastpackage = '';
+  my $lastrepo = '';
+  for my $result (@{$r->{'result'} || []}) {
+    my $project = $result->{'project'};
+    my $package = $result->{'status'}[0]->{'package'} || undef;
+    my $repo    = $result->{'repository'};
+    my $arch    = $result->{'arch'};
+    my $code    = $result->{'status'}[0]->{'code'};
+
+    $project = '' if $project eq $lastproject && $package eq $lastpackage;
+    $package = '' if $package eq $lastpackage;
+    $repo = ''    if $repo eq $lastrepo;
+
+    my $bgcolor = "#fff";
+    $bgcolor = "#bbb" if $code eq 'scheduled' || $code eq 'building' ||  $code eq 'finished' || $code eq 'blocked';
+    my $color = "#FFF";
+    $color = "#6EB927" if $code eq 'succeeded';
+    $color = "#666" if $code eq 'signing';
+    $color = "#222" if $code eq 'finished';
+    $color = "#c00" if $code eq 'unresolvable';
+    $color = "#e00" if $code eq 'broken';
+    $color = "#f00" if $code eq 'failed';
+    $color = "#fff" if $code eq 'blocked';
+
+    $html .= "<tr><td>$project</td><td>$package</td> <td>$repo</td> <td>$arch</td> <td bgcolor=\"$bgcolor\"><font color=\"$color\">$code</font></td> </tr>\n";
+
+    $lastproject = $project;
+    $lastpackage = $package;
+    $lastrepo    = $repo;
+  };
+  $html .= '</table>';
+  return $html;
+}
 
 sub repositoryevent {
   die("need event data as content\n") unless BSServer::have_content();
@@ -72,7 +124,7 @@ sub repositoryevent {
 	      'scmbranch'     => $branch };
   $cgi->{'isdefaultbranch'} = 1 if $batch->{'repository'}->{'default_branch'} eq $branch;
   my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch', 'isdefaultbranch');
-  my $h = BSRPC::rpc({'uri' => $obsurl,
+  my $h = BSRPC::rpc({'uri' => "$obsurl/source",
 	              'request' => 'POST',
 	              'headers' => [$header]}, undef, @args);
 
@@ -101,6 +153,7 @@ sub dispatch {
 # define server
 my $dispatches = [
   '/' => \&hello,
+  'GET:/repositoryresults scmrepository:? scmbranch:? code:? lastbuild:bool? multibuild:bool? locallink:bool?' => \&repositoryresults,
   'POST:/repositoryevent' => \&repositoryevent,
 ];
 
