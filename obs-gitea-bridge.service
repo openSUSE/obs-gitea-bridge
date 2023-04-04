@@ -1,18 +1,17 @@
 [Unit]
-Description=OBS GIT LFS read only provider
+Description=Gitea to OBS bridge
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-User=obs-git-lfs
+User=obs-gitea-bridge
 Group=users
 Restart=always
 #RuntimeMaxSec=21600
-WorkingDirectory=/opt/git-lfs-ro-server/
-ExecStart=/opt/git-lfs-ro-server/obs_git_lfs
+WorkingDirectory=/usr/share/obs-gitea-bridge
+ExecStart=/usr/share/obs-gitea-bridge/gitea_obs_bridge
 
 [Install]
 WantedBy=multi-user.target
-
 
