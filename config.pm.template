@@ -5,6 +5,10 @@ package config;
 our $shared_cookie = 'my_private_cookie_string';
 
 # configure your OBS server interface. It needs to be an OBS 2.11 at least.
-our $obsurl        = 'https://YOUR_API_INSTANCE/public';
+# By default, assume that we run on the same system as the OBS source server
+our $obsurl        = 'http://localhost:5352';
+
+# otherwise specify a route via the api like this:
+# our $obsurl        = 'https://YOUR_API_INSTANCE/public';
 
 1;

@@ -51,7 +51,7 @@ my $obsurl = "https://api.opensuse.org/public";
 my $header = "X-SCM-BRIDGE-COOKIE: not_configured";
 eval {
   use config;
-  $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie";
+  $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie" if $config::shared_cookie;
   $obsurl = $config::obsurl;
 };
 
