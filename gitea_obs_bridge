@@ -120,7 +120,10 @@ sub repositoryevent {
   die("no clone repository given\n") unless $batch->{'repository'}->{'clone_url'};
 
   my $branch = $batch->{'ref'};
-  $branch =~ s/.*\///;
+  # a bit of guessing here...
+  $branch =~ s/refs\/heads\///;
+  $branch =~ s/refs\/tags\///;
+  $branch =~ s/refs\///;
   print "Forward url $batch->{'repository'}->{'clone_url'} for branch $branch\n";
 
   my $cgi = { 'cmd'           => 'triggerscmsync',
