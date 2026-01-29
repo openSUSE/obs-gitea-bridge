@@ -121,9 +121,9 @@ sub repositoryevent {
 
   my $branch = $batch->{'ref'};
   # a bit of guessing here...
-  $branch =~ s/refs\/heads\///;
-  $branch =~ s/refs\/tags\///;
-  $branch =~ s/refs\///;
+  $branch =~ s/^refs\/heads\///;
+  $branch =~ s/^refs\/tags\///;
+  $branch =~ s/^refs\///;
   print "Forward url $batch->{'repository'}->{'clone_url'} for branch $branch\n";
 
   my $cgi = { 'cmd'           => 'triggerscmsync',
