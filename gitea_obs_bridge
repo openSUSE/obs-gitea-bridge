@@ -49,10 +49,12 @@ my $proto = 'http';
 
 my $obsurl = "https://api.opensuse.org/public";
 my $header = "X-SCM-BRIDGE-COOKIE: not_configured";
+my $queue_dir = "/srv/obs-gitea-bridge/queue";
 eval {
   use config;
   $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie" if $config::shared_cookie;
   $obsurl = $config::obsurl;
+  $queue_dir = $config::queue_dir if $config::queue_dir;
 };
 
 sub repositoryresults {
@@ -110,6 +112,47 @@ sub repositoryresults {
   return $html;
 }
 
+sub process_queue {
+  return unless -d $queue_dir;
+
+  opendir(DIR_HANDLE, $queue_dir) or return;
+  my @files = sort grep { /^\d+\.json$/ } readdir(DIR_HANDLE);
+  closedir(DIR_HANDLE);
+  return unless @files;
+
+  for my $file (@files) {
+    my $filepath = "$queue_dir/$file";
+    my $content = do { local $/; open(my $fh, '<', $filepath) or next; binmode($fh); <$fh> };
+    my $batch = JSON::XS::decode_json($content);
+    next unless $batch && $batch->{'ref'} && $batch->{'repository'}->{'clone_url'};
+
+    my $branch = $batch->{'ref'};
+    $branch =~ s/^refs\/heads\///;
+    $branch =~ s/^refs\/tags\///;
+    $branch =~ s/^refs\///;
+
+    my $cgi = { 'cmd'           => 'triggerscmsync',
+		'scmrepository' => $batch->{'repository'}->{'clone_url'},
+		'scmbranch'     => $branch };
+    $cgi->{'isdefaultbranch'} = 1 if $batch->{'repository'}->{'default_branch'} eq $branch;
+    my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch', 'isdefaultbranch');
+
+    eval {
+      my $h = BSRPC::rpc({'uri' => "$obsurl/source",
+      		  	   'request' => 'POST',
+      		  	   'headers' => [$header],
+      		  	   'timeout' => 30}, undef, @args);
+    };
+    if ($@) {
+      print "Queue: failed to process $file: $@\n";
+      last;
+    } else {
+      unlink($filepath) or print "Queue: failed to delete $filepath: $!\n";
+      print "Processed: $batch->{'repository'}->{'clone_url'}#$branch from $file\n";
+    }
+  }
+}
+
 sub repositoryevent {
   die("need event data as content\n") unless BSServer::have_content();
   my $batch_json = BSServer::read_data(10000000);
@@ -119,26 +162,22 @@ sub repositoryevent {
   die("no repository given\n") unless $batch->{'repository'};
   die("no clone repository given\n") unless $batch->{'repository'}->{'clone_url'};
 
-  my $branch = $batch->{'ref'};
-  # a bit of guessing here...
-  $branch =~ s/^refs\/heads\///;
-  $branch =~ s/^refs\/tags\///;
-  $branch =~ s/^refs\///;
-  print "Forward url $batch->{'repository'}->{'clone_url'} for branch $branch\n";
+  # write event to queue file
+  my $timestamp = time();
+  my $filepath = "$queue_dir/$timestamp.json";
+  open(my $fh, '>', $filepath) or die("cannot write queue file $filepath: $!\n");
+  binmode($fh);
+  print $fh $batch_json;
+  close($fh);
 
-  my $cgi = { 'cmd'           => 'triggerscmsync',
-	      'scmrepository' => $batch->{'repository'}->{'clone_url'},
-	      'scmbranch'     => $branch };
-  $cgi->{'isdefaultbranch'} = 1 if $batch->{'repository'}->{'default_branch'} eq $branch;
-  my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch', 'isdefaultbranch');
-  my $h = BSRPC::rpc({'uri' => "$obsurl/source",
-	              'request' => 'POST',
-	              'headers' => [$header]}, undef, @args);
+  # try to process queue
+  process_queue();
 
   my $resp = {
     answer => 'thank you',
   };
   #  print Dumper(JSON::XS::encode_json($resp));
+  # print "Received: $filepath\n";
   return (JSON::XS::encode_json($resp), 'Content-Type: application/json');
 }
 
@@ -173,6 +212,12 @@ my $conf = {
   'setkeepalive' => 1,
   'maxchild' => 20,
 };
+
+# ensure queue directory exists
+mkdir($queue_dir) or die("cannot create queue directory $queue_dir: $!\n") unless -d $queue_dir;
+
+# process any leftover events from previous run
+process_queue();
 
 BSDispatch::compile($conf);
 BSServer::serveropen($conf->{'port'});
