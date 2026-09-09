@@ -118,6 +118,35 @@ ok(!exists($d5->{repository}[0]{path}), 'repo without a trailing slash produces 
 my $d6 = BSPreset::preset_data('p', [{ name => 'r', repo => 'https://download.opensuse.org/repositories/P/aarch64/' }]);
 is($d6->{repository}[0]{path}[0]{repository}, 'aarch64', 'trailing slash on repo url is handled');
 
+# --- repo referencing another repository of the same manifest ---
+my $d_same = BSPreset::preset_data('p', [
+  { name => 'repoA', repo => ['repoB', 'https://download.opensuse.org/repositories/X/Y'] },
+  { name => 'repoB' },
+]);
+is($d_same->{repository}[0]{path}[0]{project}, 'p', 'same-manifest repo name reference produces same-project path');
+is($d_same->{repository}[0]{path}[0]{repository}, 'repoB', 'same-manifest repo name reference points at referenced repo');
+is($d_same->{repository}[0]{path}[1]{project}, 'X', 'url repo entry still parsed alongside name reference');
+
+my $d_self = BSPreset::preset_data('p', [
+  { name => 'repoA', repo => ['repoA'] },
+]);
+ok(!exists($d_self->{repository}[0]{path}), 'self-reference to own repository produces no path');
+
+my $d_unresolved = BSPreset::preset_data('p', [{ name => 'repoA', repo => ['unknown'] }]);
+ok(!exists($d_unresolved->{repository}[0]{path}), 'unresolved bare repo name produces no path');
+
+my $d_url_named = BSPreset::preset_data('p', [
+  { name => 'base' },
+  { name => 'top', repo => ['https://download.opensuse.org/repositories/base/x86_64'] },
+]);
+is($d_url_named->{repository}[1]{path}[0]{project}, 'base', 'url repo is not treated as same-manifest name reference');
+
+my $d_same_xml = BSPreset::preset_xml('p', [
+  { name => 'repoA', repo => ['repoB'] },
+  { name => 'repoB' },
+]);
+like($d_same_xml, qr/<path project="p" repository="repoB"\/>/, 'same-manifest reference appears in xml');
+
 # --- configurable gitprefix ---
 my $saved_prefix = $BSPreset::gitprefix;
 $BSPreset::gitprefix = 'https://my.example.org/repos/';
@@ -148,10 +177,21 @@ is(BSPreset::preset_xml('p', []),
 my $fp = BSPreset::preset_data('p',
   [{ name => 'openSUSE_Factory', repo => 'https://download.opensuse.org/repositories/X/Y' }],
   { openSUSE_Factory => [ { project => 'git:Owner:Upstream:main', repository => 'openSUSE_Factory' } ] });
-is($fp->{repository}[0]{path}[0]{project}, 'X', 'preset path stays first');
-is($fp->{repository}[0]{path}[1]{project}, 'git:Owner:Upstream:main', 'upstream project path appended');
-is($fp->{repository}[0]{path}[1]{repository}, 'openSUSE_Factory', 'upstream project repository matches preset name');
+is($fp->{repository}[0]{path}[0]{project}, 'git:Owner:Upstream:main', 'upstream project path replaces the original');
+is($fp->{repository}[0]{path}[0]{repository}, 'openSUSE_Factory', 'upstream project repository matches preset name');
+is(scalar(@{$fp->{repository}[0]{path}}), 1, 'original path entries are dropped in fork builds');
 ok(!exists($fp->{repository}[0]{extranonexistent}), 'unreferenced repos get no upstream path');
+
+my $fp2 = BSPreset::preset_data('git:Owner:Forked:main',
+  [{ name => 'openSUSE_Factory', repo => 'https://download.opensuse.org/repositories/X/Y' }],
+  { openSUSE_Factory => [
+      { 'project' => 'git:Owner:Upstream:main', 'repository' => 'openSUSE_Factory' },
+      { 'project' => 'git:Owner:Forked:main', 'repository' => 'Factory' },
+  ] });
+is_deeply($fp2->{repository}[0]{path}, [
+  { 'project' => 'git:Owner:Upstream:main', 'repository' => 'openSUSE_Factory' },
+  { 'project' => 'git:Owner:Forked:main', 'repository' => 'Factory' },
+], 'fork path entries replace originals, including same-project replications');
 
 my $fx = BSPreset::preset_xml('p', [{ name => 'r' }],
   { r => [ { project => 'git:Owner:Upstream:main', repository => 'r' } ] });

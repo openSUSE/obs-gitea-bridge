@@ -59,7 +59,7 @@ my $api_password;
 eval {
   use config;
   $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie" if $config::shared_cookie;
-  $obsurl = $config::obsurl;
+  $obsurl = $config::obsurl if $config::obsurl;
   $queue_dir = $config::queue_dir if $config::queue_dir;
   $gitea_root = $config::gitea_root if $config::gitea_root;
   $autosetup_prefix = $config::autosetup_prefix if $config::autosetup_prefix;
@@ -195,6 +195,35 @@ sub git_capture {
   return \@lines;
 }
 
+# Return the short name of the default branch of the given git repository,
+# or undef when it cannot be determined.
+sub git_get_default_branch {
+  my ($gitdir) = @_;
+  return undef unless defined $gitdir;
+  my $out = git_capture('--git-dir=' . $gitdir, 'symbolic-ref', '--short', 'HEAD');
+  return undef unless $out && defined $out->[0] && length $out->[0];
+  return $out->[0];
+}
+
+# List the package source entries at the given tree level of the given git
+# repository, as an arrayref of names (empty arrayref when the level has no
+# package sources), or undef on failure. Plain files are not package sources.
+# Both directories and submodules are package sources: a submodule entry is a
+# single commit reference inside the tree.
+sub git_lstree_sources {
+  my ($gitdir, $tree) = @_;
+  return undef unless defined $gitdir && defined $tree;
+  my $out = git_capture('--git-dir=' . $gitdir, 'ls-tree', "$tree");
+  my @sources;
+  if ($out) {
+    for my $line (@$out) {
+      next unless $line =~ m{^\S+\s+(?:tree|commit)\s+\S+\t(.+)$};
+      push @sources, $1;
+    }
+  }
+  return \@sources;
+}
+
 # In the fork case, determine the set of package source directories whose
 # latest content differs from the repository this git repo was forked from.
 # Package source directories are derived from the _manifest subdirectories
@@ -208,6 +237,12 @@ sub fork_changed_package_sources {
   return undef unless ref($parent) eq 'HASH' && $parent->{'full_name'} && $repository->{'full_name'};
   my $branch = gitref_to_branch($batch->{'ref'});
   return undef unless defined $branch;
+  # The branch of the forked-from repository may differ from the fork branch,
+  # e.g. when the fork lives on a differently named branch. Gitea events do not
+  # carry it, so the fork branch is used unless the synthetic --parent batch
+  # specifies one.
+  my $parent_branch = parent_branch_of($batch);
+  $parent_branch = $branch unless defined $parent_branch;
   my $gitdir = "$gitea_root/gitea-repositories/" . lc($repository->{'full_name'}) . ".git";
   my $parent_gitdir = "$gitea_root/gitea-repositories/" . lc($parent->{'full_name'}) . ".git";
   my $subdirectories = eval { BSPreset::manifest_subdirectories($manifest) };
@@ -215,12 +250,10 @@ sub fork_changed_package_sources {
   my %entries;
   if (ref($subdirectories) eq 'ARRAY' && @$subdirectories) {
     for my $sub (@$subdirectories) {
-      my $out = git_capture('--git-dir=' . $gitdir, 'ls-tree', '--name-only', "$branch:$sub");
-      $entries{$sub} = $out || [];
+      $entries{$sub} = git_lstree_sources($gitdir, "$branch:$sub");
     }
   } else {
-    my $out = git_capture('--git-dir=' . $gitdir, 'ls-tree', '--name-only', $branch);
-    $entries{''} = $out || [];
+    $entries{''} = git_lstree_sources($gitdir, $branch);
   }
   my $dirs = BSPreset::package_source_dirs($subdirectories, %entries);
   my %hashes;
@@ -228,10 +261,24 @@ sub fork_changed_package_sources {
   for my $dir (@$dirs) {
     my $out = git_capture('--git-dir=' . $gitdir, 'rev-parse', "$branch:$dir");
     $hashes{$dir} = $out->[0] if $out && defined $out->[0];
-    my $pout = git_capture('--git-dir=' . $parent_gitdir, 'rev-parse', "$branch:$dir");
+    my $pout = git_capture('--git-dir=' . $parent_gitdir, 'rev-parse', "$parent_branch:$dir");
     $parent_hashes{$dir} = $pout->[0] if $pout && defined $pout->[0];
   }
   return [ sort @{ BSPreset::changed_package_sources($dirs, \%hashes, \%parent_hashes) } ];
+}
+
+# Return the branch of the forked-from repository from a fork batch, or undef
+# when the batch does not specify one. Gitea webhook batches carry no parent
+# branch, only the synthetic --parent batch constructed for the single-shot
+# commands does.
+sub parent_branch_of {
+  my ($batch) = @_;
+  my $repository = ref($batch) eq 'HASH' ? $batch->{'repository'} : undef;
+  my $parent = ref($repository) eq 'HASH' ? $repository->{'parent'} : undef;
+  return undef unless ref($parent) eq 'HASH';
+  my $branch = $parent->{'branch'};
+  return undef unless defined $branch && length $branch;
+  return gitref_to_branch($branch);
 }
 
 sub process_queue {
@@ -319,21 +366,31 @@ sub delete_project {
   print "delete_project: failed to delete $projectname: $@\n" if $@;
 }
 
-sub create_or_update_project {
+# Build the project meta xml for $projectname. In the fork case, add upstream
+# path entries for each preset repository and restrict the build to the package
+# sources that actually changed against the forked-from repository, by adding
+# an onlybuild CGI parameter per changed package to the scmsync url.
+# Dies when the project xml cannot be built.
+sub project_xml {
   my ($projectname, $presets, $batch, $scmsync, $manifest) = @_;
 
   my $extrapaths = parent_project_paths($projectname, $presets, $batch);
-  # In the fork case, restrict the build to the package sources that actually
-  # changed against the forked-from repository, by adding an onlybuild CGI
-  # parameter per changed package to the scmsync url.
   my $changed = fork_changed_package_sources($manifest, $batch);
   if ($changed && @$changed) {
     $scmsync = BSPreset::scmsync_with_onlybuild($scmsync, $changed);
-    print "create_or_update_project: building $projectname only for changed packages: @$changed\n";
+    print "project_xml: building $projectname only for changed packages: @$changed\n";
   }
   my $xml = eval { BSPreset::preset_xml($projectname, $presets, $extrapaths, $scmsync) };
+  die("cannot build project xml for $projectname: $@\n") if $@;
+  return $xml;
+}
+
+sub create_or_update_project {
+  my ($projectname, $presets, $batch, $scmsync, $manifest) = @_;
+
+  my $xml = eval { project_xml($projectname, $presets, $batch, $scmsync, $manifest) };
   if ($@) {
-    print "create_or_update_project: cannot build project xml for $projectname: $@\n";
+    print "create_or_update_project: $@";
     return;
   }
   print "create_or_update_project: project xml for $projectname:\n$xml";
@@ -380,17 +437,22 @@ sub parent_project_paths {
   return undef unless defined $p_org && defined $p_repo;
   my $branch = gitref_to_branch($batch->{'ref'});
   return undef unless defined $branch;
+  # The upstream project is built from the forked-from repository. Its branch
+  # may differ from the fork branch; Gitea events do not carry it, so the fork
+  # branch is used unless the synthetic --parent batch specifies one.
+  my $parent_branch = parent_branch_of($batch);
+  $parent_branch = $branch unless defined $parent_branch;
   $p_org =~ s/:/_/g;
   $p_repo =~ s/:/_/g;
-  my $parent_project = "$autosetup_prefix:$p_org:$p_repo:$branch";
+  my $parent_project = "$autosetup_prefix:$p_org:$p_repo:$parent_branch";
   my ($pmeta, $err) = get_project_meta($parent_project);
   if ($err) {
-    print "create_or_update_project: upstream project $parent_project not found, building $projectname without extra paths: $err";
+    print "parent_project_paths: upstream project $parent_project not found, building $projectname without extra paths: $err";
     return undef;
   }
   my $extrapaths = BSPreset::extrapaths_from_parent_meta($projectname, $presets, $pmeta, $parent_project);
   if ($extrapaths) {
-    print "create_or_update_project: building $projectname against upstream project $parent_project\n";
+    print "parent_project_paths: building $projectname against upstream project $parent_project\n";
   }
   return $extrapaths;
 }
@@ -412,10 +474,15 @@ sub giturl_to_fullname {
   return $path;
 }
 
-# Resolve a "GIT_URL#BRANCH" spec into the project name and the manifest
-# content taken from the given branch.
+# Resolve a "GIT_URL#BRANCH" spec into the project name, the manifest
+# content taken from the given branch, the scmsync url and a synthetic event
+# batch for the given (optional) parent repository the repository was forked
+# from. The parent is given as "GIT_URL#BRANCH" (the branch of the
+# forked-from repository, which may differ from the fork branch) or as a bare
+# "ORG/REPO", in which case the fork branch is used.
 sub resolve_project_spec {
-  my ($spec) = @_;
+  my ($spec, $parent) = @_;
+
   my ($giturl, $branch) = split(/#/, $spec, 2);
   die("invalid '$spec', expected GIT_URL#BRANCH_NAME\n")
     unless defined $giturl && length $giturl && defined $branch && length $branch;
@@ -429,28 +496,61 @@ sub resolve_project_spec {
   my $manifest = git_show($gitdir, $branch, '_manifest');
   die("cannot read _manifest from $giturl#$branch\n") unless defined $manifest;
 
+  my $batch;
+  if (defined $parent) {
+    my ($parent_fullname, $parent_branch);
+    my ($parent_spec, $pbr) = split(/#/, $parent, 2);
+    if (defined $pbr) {
+      $parent_fullname = giturl_to_fullname($parent_spec);
+      die("invalid parent '$parent', expected GIT_URL#BRANCH or ORG/REPO\n") unless defined $parent_fullname;
+      $parent_branch = gitref_to_branch($pbr);
+      die("invalid parent '$parent', expected GIT_URL#BRANCH or ORG/REPO\n") unless defined $parent_branch;
+    } else {
+      die("invalid parent '$parent', expected GIT_URL#BRANCH or ORG/REPO\n")
+        unless $parent =~ m{^[^/]+/[^/]+$};
+      $parent_fullname = $parent;
+      $parent_branch = $branch;
+    }
+    my $parent_gitdir = "$gitea_root/gitea-repositories/" . lc($parent_fullname) . ".git";
+    die("parent repository not found: $parent_fullname\n") unless -d $parent_gitdir;
+    my $default_branch = git_get_default_branch($parent_gitdir);
+    die("cannot determine default branch of parent repository $parent_fullname\n") unless defined $default_branch;
+    $batch = { 'ref' => "refs/heads/$branch",
+	       'repository' => { 'full_name' => $fullname,
+	       	       	       	 'clone_url' => $giturl,
+	       	       	       	 'default_branch' => $default_branch,
+	       	       	       	 'parent' => { 'full_name' => $parent_fullname,
+	       	       	       	 	       'branch' => $parent_branch } } };
+  }
+
   my ($org, $repo) = split('/', $fullname, 2);
   die("cannot determine org/repo from $fullname\n") unless defined $org && defined $repo;
   $org =~ s/:/_/g;
   $repo =~ s/:/_/g;
-  return ("$autosetup_prefix:$org:$repo:$branch", $manifest, "$giturl#$branch");
+  return ("$autosetup_prefix:$org:$repo:$branch", $manifest, "$giturl#$branch", $batch);
 }
 
 # Set up a single project for a given git branch, given as "GIT_URL#BRANCH".
+# An optional parent "GIT_URL#BRANCH" (or bare "ORG/REPO") marks the
+# repository as forked from that repository, enabling fork handling like the
+# event based setup.
 sub setup_single_project {
-  my ($spec) = @_;
-  my ($projectname, $manifest, $scmsync) = resolve_project_spec($spec);
-  setup_project($manifest, $projectname, undef, $scmsync);
+  my ($spec, $parent) = @_;
+  my ($projectname, $manifest, $scmsync, $batch) = resolve_project_spec($spec, $parent);
+  setup_project($manifest, $projectname, $batch, $scmsync);
 }
 
 # Print the project meta xml for a given git branch, given as "GIT_URL#BRANCH".
+# An optional parent "GIT_URL#BRANCH" (or bare "ORG/REPO") marks the
+# repository as forked from that repository, enabling fork handling like the
+# event based setup.
 sub show_single_project {
-  my ($spec) = @_;
-  my ($projectname, $manifest, $scmsync) = resolve_project_spec($spec);
+  my ($spec, $parent) = @_;
+  my ($projectname, $manifest, $scmsync, $batch) = resolve_project_spec($spec, $parent);
   my $presets = eval { BSPreset::manifest_presets($manifest) };
   die("cannot parse _manifest: $@") if $@;
   if ($presets && @$presets) {
-    print BSPreset::preset_xml($projectname, $presets, undef, $scmsync);
+    print project_xml($projectname, $presets, $batch, $scmsync, $manifest);
   } else {
     print "no project configured for $spec\n";
   }
@@ -517,19 +617,44 @@ my $conf = {
 };
 
 # single-shot mode: setup or show a single project for a given git branch,
-# then exit without starting the server
+# then exit without starting the server. An optional --parent GIT_URL#BRANCH
+# (also as --parent=GIT_URL#BRANCH) marks the repository as forked from that
+# repository; the branch of the forked-from repository may differ from the fork
+# branch. A bare --parent ORG/REPO is also accepted, using the fork branch.
+# --setup-project, --show-project, the spec and --parent may be given in any
+# order.
 if (@ARGV) {
-  if ($ARGV[0] eq '--setup-project') {
-    die("usage: $0 --setup-project GIT_URL#BRANCH_NAME\n") unless $ARGV[1];
-    setup_single_project($ARGV[1]);
-    exit(0);
+  my ($cmd, $spec, $parent);
+  for (my $i = 0; $i < @ARGV; $i++) {
+    my $arg = $ARGV[$i];
+    if ($arg eq '--setup-project' || $arg eq '--show-project') {
+      die("duplicate command $arg\n") if defined $cmd;
+      $cmd = $arg;
+    } elsif ($arg eq '--parent') {
+      die("no parent given, missing --parent GIT_URL#BRANCH_NAME\n")
+        unless defined $ARGV[$i + 1] && $ARGV[$i + 1] !~ /^--/;
+      die("duplicate --parent $parent\n") if defined $parent;
+      $parent = $ARGV[++$i];
+    } elsif ($arg =~ /^--parent=(.+)$/) {
+      die("duplicate --parent $parent\n") if defined $parent;
+      $parent = $1;
+    } elsif ($arg =~ /^--/) {
+      die("unknown option $arg\n");
+    } else {
+      die("multiple specs given\n") if defined $spec;
+      $spec = $arg;
+    }
   }
-  if ($ARGV[0] eq '--show-project') {
-    die("usage: $0 --show-project GIT_URL#BRANCH_NAME\n") unless $ARGV[1];
-    show_single_project($ARGV[1]);
-    exit(0);
+  my $usage = "usage: $0 --setup-project|--show-project GIT_URL#BRANCH_NAME [--parent GIT_URL#BRANCH_NAME]\n";
+  die("no setup/show command given\n$usage") unless defined $cmd;
+  die($usage) unless defined $spec;
+
+  if ($cmd eq '--setup-project') {
+    setup_single_project($spec, $parent);
+  } else {
+    show_single_project($spec, $parent);
   }
-  die("unknown option $ARGV[0], usage: $0 [--setup-project GIT_URL#BRANCH_NAME | --show-project GIT_URL#BRANCH_NAME]\n");
+  exit(0);
 }
 
 # ensure queue directory exists

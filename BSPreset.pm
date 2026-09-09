@@ -110,13 +110,16 @@ sub scmsync_with_onlybuild {
 
 # Build the $BSXML::proj conformant data structure for a list of presets.
 # $extrapaths is an optional hashref mapping repository name to a list of
-# additional {project, repository} path entries (e.g. for building a fork
-# against its upstream project). $scmsync is an optional GIT_URL#BRANCH
+# {project, repository} path entries. In the fork case these entries REPLACE
+# the path entries derived from the manifest repo urls (e.g. the fork builds
+# against its upstream project and this project's own repositories, not
+# against the base distribution). $scmsync is an optional GIT_URL#BRANCH
 # value put into the project's scmsync element.
 sub preset_data {
   my ($projectname, $presets, $extrapaths, $scmsync) = @_;
   my $data = { 'name' => $projectname, 'title' => undef, 'description' => undef };
   $data->{'scmsync'} = $scmsync if defined $scmsync && length $scmsync;
+  my %preset_names = map { $_->{'name'} => 1 } grep { ref($_) eq 'HASH' && $_->{'name'} } @$presets;
   my @repository;
   for my $preset (@$presets) {
     next unless ref($preset) eq 'HASH' && $preset->{'name'};
@@ -130,6 +133,12 @@ sub preset_data {
     my @path;
     for my $url (@$repo_urls) {
       next unless defined $url && length $url;
+      if ($preset_names{$url} && $url !~ m{://} && $url ne $preset->{'name'}) {
+        # reference to another repository of this same project, defined in
+        # the same _manifest
+        push @path, { 'project' => $projectname, 'repository' => $url };
+        next;
+      }
       $url =~ s{^\Q$gitprefix\E}{};
       $url =~ s{/$}{};
       my $slash = rindex($url, '/');
@@ -139,12 +148,13 @@ sub preset_data {
       next unless length $project && length $repository;
       push @path, { 'project' => $project, 'repository' => $repository };
     }
-$repo->{'path'} = \@path if @path;
-      if ($extrapaths && ref($extrapaths->{$repo->{'name'}}) eq 'ARRAY') {
-        push @path, @{$extrapaths->{$repo->{'name'}}};
-        $repo->{'path'} = \@path;
-      }
-      push @repository, $repo;
+    $repo->{'path'} = \@path if @path;
+    if ($extrapaths && ref($extrapaths->{$repo->{'name'}}) eq 'ARRAY') {
+      # fork case: the path entries built against the forked-from project and
+      # this project's own repositories replace the original path entries
+      $repo->{'path'} = [ @{$extrapaths->{$repo->{'name'}}} ];
+    }
+    push @repository, $repo;
   }
   $data->{'repository'} = \@repository if @repository;
   return $data;
@@ -156,14 +166,15 @@ sub preset_xml {
   return XMLout($BSXML::proj, preset_data($projectname, $presets, $extrapaths, $scmsync));
 }
 
-# Compute additional path entries that replicate the upstream project's
-# repository layout for a fork build. $pmeta is the project meta of the
-# upstream project $parent_project the fork builds against. For every preset
-# repository that exists upstream, an entry pointing into $parent_project is
-# added; same-project path entries of the upstream repository are replicated
-# pointing at the new project $projectname. Returns undef when none of the
-# presets exist in the upstream project, otherwise a hashref mapping preset
-# repository name to a list of {project, repository} path entries.
+# Compute the path entries that replicate the upstream project's repository
+# layout for a fork build. $pmeta is the project meta of the upstream project
+# $parent_project the fork builds against. For every preset repository that
+# exists upstream, an entry pointing into $parent_project is provided;
+# same-project path entries of the upstream repository are replicated pointing
+# at the new project $projectname. These entries replace the path entries of
+# the fork project (see preset_data). Returns undef when none of the presets
+# exist in the upstream project, otherwise a hashref mapping preset repository
+# name to a list of {project, repository} path entries.
 sub extrapaths_from_parent_meta {
   my ($projectname, $presets, $pmeta, $parent_project) = @_;
   my %parent_repos = map { $_->{'name'} => $_ } grep { $_->{'name'} } @{$pmeta->{'repository'} || []};
