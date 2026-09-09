@@ -300,8 +300,10 @@ sub get_project_meta {
 
 # If the git repository was forked from another one, look up the upstream
 # project (PREFIX:ORG:REPO:BRANCH) in OBS and return additional path entries
-# for each preset repository that points into it. Returns undef when the
-# repository is not a fork or the upstream project does not exist.
+# for each preset repository that points into it. Same-project path entries
+# of the upstream repositories are replicated pointing at the new project.
+# Returns undef when the repository is not a fork or the upstream project
+# does not exist.
 sub parent_project_paths {
   my ($projectname, $presets, $batch) = @_;
   return undef unless ref($batch) eq 'HASH' && defined $autosetup_prefix;
@@ -319,14 +321,9 @@ sub parent_project_paths {
     print "create_or_update_project: upstream project $parent_project not found, building $projectname without extra paths: $err";
     return undef;
   }
-  my %parent_repos = map { $_->{'name'} => 1 } grep { $_->{'name'} } @{$pmeta->{'repository'} || []};
-  my $extrapaths;
-  for my $preset (@$presets) {
-    next unless ref($preset) eq 'HASH' && $preset->{'name'};
-    next unless $parent_repos{$preset->{'name'}};
+  my $extrapaths = BSPreset::extrapaths_from_parent_meta($projectname, $presets, $pmeta, $parent_project);
+  if ($extrapaths) {
     print "create_or_update_project: building $projectname against upstream project $parent_project\n";
-    $extrapaths = {} unless $extrapaths;
-    push @{$extrapaths->{$preset->{'name'}}}, { 'project' => $parent_project, 'repository' => $preset->{'name'} };
   }
   return $extrapaths;
 }

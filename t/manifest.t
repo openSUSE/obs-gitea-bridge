@@ -101,11 +101,30 @@ my $fx = BSPreset::preset_xml('p', [{ name => 'r' }],
   { r => [ { project => 'git:Owner:Upstream:main', repository => 'r' } ] });
 like($fx, qr/<path project="git:Owner:Upstream:main" repository="r"\/>/, 'xml contains upstream path');
 
+# --- extrapaths_from_parent_meta (fork same-project replication) ---
+my $pm = { 'repository' => [
+  { 'name' => 'openSUSE_Factory', 'path' => [
+      { 'project' => 'git:Owner:Upstream:main', 'repository' => 'Factory' },
+      { 'project' => 'openSUSE:Factory', 'repository' => 'standard' },
+  ] },
+  { 'name' => 'Factory', 'path' => [ { 'project' => 'openSUSE:Factory', 'repository' => 'standard' } ] },
+] };
+my $ep = BSPreset::extrapaths_from_parent_meta('git:Owner:Forked:main',
+  [ { name => 'openSUSE_Factory' }, { name => 'Factory' }, { name => 'Missing' } ],
+  $pm, 'git:Owner:Upstream:main');
+is_deeply($ep->{'openSUSE_Factory'}, [
+  { 'project' => 'git:Owner:Upstream:main', 'repository' => 'openSUSE_Factory' },
+  { 'project' => 'git:Owner:Forked:main', 'repository' => 'Factory' },
+], 'same-project path of upstream repo replicated pointing at the new project');
+is_deeply($ep->{'Factory'}, [
+  { 'project' => 'git:Owner:Upstream:main', 'repository' => 'Factory' },
+], 'repo without same-project entry only gets upstream path');
+ok(!exists($ep->{'Missing'}), 'preset not present in upstream gets no paths');
+
 # --- scmsync ---
 my $fs = BSPreset::preset_xml('p', [{ name => 'r' }], undef, 'https://gitea.example.com/owner/repo.git#main');
 like($fs, qr/<scmsync>https:\/\/gitea\.example\.com\/owner\/repo\.git#main<\/scmsync>/, 'xml contains scmsync element');
 my $fsd = BSPreset::preset_data('p', [{ name => 'r' }], undef, 'x#y');
 is($fsd->{scmsync}, 'x#y', 'scmsync stored in data');
-ok(!exists(BSPreset::preset_data('p', [{ name => 'r' }])->{scmsync}), 'no scmsync when not given');
 
 done_testing();

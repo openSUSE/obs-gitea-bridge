@@ -91,4 +91,33 @@ sub preset_xml {
   return XMLout($BSXML::proj, preset_data($projectname, $presets, $extrapaths, $scmsync));
 }
 
+# Compute additional path entries that replicate the upstream project's
+# repository layout for a fork build. $pmeta is the project meta of the
+# upstream project $parent_project the fork builds against. For every preset
+# repository that exists upstream, an entry pointing into $parent_project is
+# added; same-project path entries of the upstream repository are replicated
+# pointing at the new project $projectname. Returns undef when none of the
+# presets exist in the upstream project, otherwise a hashref mapping preset
+# repository name to a list of {project, repository} path entries.
+sub extrapaths_from_parent_meta {
+  my ($projectname, $presets, $pmeta, $parent_project) = @_;
+  my %parent_repos = map { $_->{'name'} => $_ } grep { $_->{'name'} } @{$pmeta->{'repository'} || []};
+  my $extrapaths;
+  for my $preset (@$presets) {
+    next unless ref($preset) eq 'HASH' && $preset->{'name'};
+    next unless $parent_repos{$preset->{'name'}};
+    $extrapaths = {} unless $extrapaths;
+    push @{$extrapaths->{$preset->{'name'}}}, { 'project' => $parent_project, 'repository' => $preset->{'name'} };
+    # Replicate same-project path entries from the upstream repository, so the
+    # new project inherits from its own repository the same way the upstream
+    # project inherits from its own.
+    for my $path (@{$parent_repos{$preset->{'name'}}->{'path'} || []}) {
+      next unless ref($path) eq 'HASH' && $path->{'project'} && $path->{'repository'};
+      next unless $path->{'project'} eq $parent_project;
+      push @{$extrapaths->{$preset->{'name'}}}, { 'project' => $projectname, 'repository' => $path->{'repository'} };
+    }
+  }
+  return $extrapaths;
+}
+
 1;
