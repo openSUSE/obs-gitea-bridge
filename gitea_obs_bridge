@@ -81,12 +81,11 @@ if (defined $api_username && defined $api_password) {
 # the prefix stripped from repo urls when deriving the OBS path
 # project/repository. Only needed for the analysing http server.
 eval {
-  my $config = BSRPC::rpc({ 'uri' => "$obsurl/configuration",
-                            'request' => 'GET',
-                            'headers' => [$header],
-                            'timeout' => 30 },
-                          $BSXML::configuration);
-  my $download_url = $config->{'download_url'};
+  my $body = BSRPC::rpc({ 'uri' => "$obsurl/configuration",
+                          'request' => 'GET',
+                          'headers' => [$header],
+                          'timeout' => 30 }, undef);
+  my ($download_url) = ($body =~ m{<download_url>\s*([^<]+?)\s*</download_url>});
   $BSPreset::gitprefix = $download_url if defined $download_url && length $download_url;
   print "using download_url $BSPreset::gitprefix\n";
 } unless @ARGV;
