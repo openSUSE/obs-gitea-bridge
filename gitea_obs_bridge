@@ -257,7 +257,7 @@ sub create_or_update_project {
   push @hdrs, $api_auth if defined $api_auth;
   eval {
     BSRPC::rpc({ 'uri' => "$source_url/source/$projectname/_meta",
-    		  	   'request' => 'POST',
+    		  	   'request' => 'PUT',
     		  	   'headers' => \@hdrs,
     		  	   'timeout' => 30,
     		  	   'data' => $xml }, undef);
