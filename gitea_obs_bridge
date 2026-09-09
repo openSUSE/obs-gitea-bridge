@@ -175,6 +175,65 @@ sub git_show {
   return $data;
 }
 
+# Run a git command and return its standard output as an arrayref of lines,
+# or undef on failure (git's error output is suppressed).
+sub git_capture {
+  my (@args) = @_;
+  my $pid = open(my $fh, '-|');
+  if (!defined $pid) {
+    die("cannot fork: $!\n");
+  }
+  if ($pid == 0) {
+    open(STDERR, '>', '/dev/null');
+    exec('git', @args);
+    exit 255;
+  }
+  my @lines = <$fh>;
+  close($fh);
+  return undef if ($? >> 8) != 0;
+  chomp @lines;
+  return \@lines;
+}
+
+# In the fork case, determine the set of package source directories whose
+# latest content differs from the repository this git repo was forked from.
+# Package source directories are derived from the _manifest subdirectories
+# array (or the top level when absent). Returns a sorted arrayref of changed
+# package source directories, or undef when the batch is not a fork or the
+# manifest cannot be parsed.
+sub fork_changed_package_sources {
+  my ($manifest, $batch) = @_;
+  my $repository = ref($batch) eq 'HASH' ? $batch->{'repository'} : undef;
+  my $parent = ref($repository) eq 'HASH' ? $repository->{'parent'} : undef;
+  return undef unless ref($parent) eq 'HASH' && $parent->{'full_name'} && $repository->{'full_name'};
+  my $branch = gitref_to_branch($batch->{'ref'});
+  return undef unless defined $branch;
+  my $gitdir = "$gitea_root/gitea-repositories/" . lc($repository->{'full_name'}) . ".git";
+  my $parent_gitdir = "$gitea_root/gitea-repositories/" . lc($parent->{'full_name'}) . ".git";
+  my $subdirectories = eval { BSPreset::manifest_subdirectories($manifest) };
+  return undef if $@;
+  my %entries;
+  if (ref($subdirectories) eq 'ARRAY' && @$subdirectories) {
+    for my $sub (@$subdirectories) {
+      my $out = git_capture('--git-dir=' . $gitdir, 'ls-tree', '--name-only', "$branch:$sub");
+      $entries{$sub} = $out || [];
+    }
+  } else {
+    my $out = git_capture('--git-dir=' . $gitdir, 'ls-tree', '--name-only', $branch);
+    $entries{''} = $out || [];
+  }
+  my $dirs = BSPreset::package_source_dirs($subdirectories, %entries);
+  my %hashes;
+  my %parent_hashes;
+  for my $dir (@$dirs) {
+    my $out = git_capture('--git-dir=' . $gitdir, 'rev-parse', "$branch:$dir");
+    $hashes{$dir} = $out->[0] if $out && defined $out->[0];
+    my $pout = git_capture('--git-dir=' . $parent_gitdir, 'rev-parse', "$branch:$dir");
+    $parent_hashes{$dir} = $pout->[0] if $pout && defined $pout->[0];
+  }
+  return [ sort @{ BSPreset::changed_package_sources($dirs, \%hashes, \%parent_hashes) } ];
+}
+
 sub process_queue {
   return unless -d $queue_dir;
 
@@ -241,7 +300,7 @@ sub setup_project {
     return;
   }
   if ($presets && @$presets) {
-    create_or_update_project($projectname, $presets, $batch, $scmsync);
+    create_or_update_project($projectname, $presets, $batch, $scmsync, $manifest);
   } else {
     delete_project($projectname);
   }
@@ -261,9 +320,17 @@ sub delete_project {
 }
 
 sub create_or_update_project {
-  my ($projectname, $presets, $batch, $scmsync) = @_;
+  my ($projectname, $presets, $batch, $scmsync, $manifest) = @_;
 
   my $extrapaths = parent_project_paths($projectname, $presets, $batch);
+  # In the fork case, restrict the build to the package sources that actually
+  # changed against the forked-from repository, by adding an onlybuild CGI
+  # parameter per changed package to the scmsync url.
+  my $changed = fork_changed_package_sources($manifest, $batch);
+  if ($changed && @$changed) {
+    $scmsync = BSPreset::scmsync_with_onlybuild($scmsync, $changed);
+    print "create_or_update_project: building $projectname only for changed packages: @$changed\n";
+  }
   my $xml = eval { BSPreset::preset_xml($projectname, $presets, $extrapaths, $scmsync) };
   if ($@) {
     print "create_or_update_project: cannot build project xml for $projectname: $@\n";

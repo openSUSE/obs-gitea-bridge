@@ -35,6 +35,62 @@ is(BSPreset::manifest_presets("- a\n- b\n"), undef, 'manifest that is a list -> 
 eval { BSPreset::manifest_presets("key: [unclosed") };
 like($@, qr/cannot parse _manifest/, 'invalid yaml dies with parse error');
 
+# --- manifest_subdirectories / package source dirs ---
+is(BSPreset::manifest_subdirectories($manifest), undef, 'no subdirectories in default manifest');
+
+my $msub = <<'YAML';
+presets:
+  - name: openSUSE_Factory
+    repo:
+      - https://download.opensuse.org/repositories/openSUSE:Factory/standard
+subdirectories:
+  - partA
+  - partB
+YAML
+is_deeply(BSPreset::manifest_subdirectories($msub), ['partA', 'partB'], 'subdirectories parsed');
+
+is(BSPreset::manifest_subdirectories("presets:\n"), undef, 'no subdirectories key -> undef');
+eval { BSPreset::manifest_subdirectories("key: [unclosed") };
+like($@, qr/cannot parse _manifest/, 'invalid yaml dies in subdirectories parse');
+
+my $pkg_dirs = BSPreset::package_source_dirs(['partA', 'partB'],
+  partA => ['pkg1', 'pkg2'], partB => ['pkg3']);
+is_deeply($pkg_dirs, ['partA/pkg1', 'partA/pkg2', 'partB/pkg3'], 'package source dirs from subdirectories');
+
+my $top_dirs = BSPreset::package_source_dirs(undef, '' => ['pkg1', 'pkg2'], partA => ['x']);
+is_deeply($top_dirs, ['pkg1', 'pkg2'], 'no subdirectories -> top level package dirs');
+
+my $sub_only = BSPreset::package_source_dirs(['partA'], partA => ['pkg1'], '' => ['other']);
+is_deeply($sub_only, ['partA/pkg1'], 'entries outside subdirectories are ignored');
+
+my $norm_dirs = BSPreset::package_source_dirs(['./partA/'], partA => ['pkg1']);
+is_deeply($norm_dirs, ['partA/pkg1'], 'leading ./ and trailing / in subdirectories are normalized');
+
+# --- changed_package_sources (fork change detection) ---
+my $changed = BSPreset::changed_package_sources(['a', 'b', 'new'],
+  { a => 'abc', b => 'def', new => 'ghi' },
+  { a => 'abc', b => 'xyz' });
+is_deeply($changed, ['b', 'new'], 'changed packages are those differing or missing upstream');
+
+my $unchanged = BSPreset::changed_package_sources(['a', 'b'],
+  { a => 'abc', b => 'def' }, { a => 'abc', b => 'def' });
+is_deeply($unchanged, [], 'unchanged packages detected');
+
+# --- scmsync_with_onlybuild (fork onlybuild restriction) ---
+is(BSPreset::scmsync_with_onlybuild('https://gitea.example.com/o/r.git#main', ['pkg1', 'pkg2']),
+   'https://gitea.example.com/o/r.git?onlybuild=pkg1&onlybuild=pkg2#main',
+   'onlybuild params added before the branch fragment');
+is(BSPreset::scmsync_with_onlybuild('https://gitea.example.com/o/r.git#main', []),
+   'https://gitea.example.com/o/r.git#main',
+   'no changed packages -> scmsync unchanged');
+is(BSPreset::scmsync_with_onlybuild('https://gitea.example.com/o/r.git?onlybuild=pkg1#main', ['pkg2']),
+   'https://gitea.example.com/o/r.git?onlybuild=pkg1#main',
+   'existing onlybuild param is not duplicated');
+is(BSPreset::scmsync_with_onlybuild('https://gitea.example.com/o/r.git', ['pkg1']),
+   'https://gitea.example.com/o/r.git?onlybuild=pkg1',
+   'scmsync without fragment gets onlybuild appended');
+is(BSPreset::scmsync_with_onlybuild(undef, ['pkg1']), undef, 'undef scmsync stays undef');
+
 # --- preset_data ---
 my $data = BSPreset::preset_data('git:Owner:Repo:main', $presets);
 is($data->{name}, 'git:Owner:Repo:main', 'project name is set');

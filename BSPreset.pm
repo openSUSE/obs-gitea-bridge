@@ -43,6 +43,71 @@ sub manifest_presets {
   return $data->{'presets'};
 }
 
+# Return the subdirectories array from a _manifest string, or undef when the
+# manifest does not define any (package sources then live at the top level).
+sub manifest_subdirectories {
+  my ($manifest) = @_;
+  my $data = eval { YAML::XS::Load($manifest) };
+  die("cannot parse _manifest: $@\n") if $@;
+  return undef unless ref($data) eq 'HASH';
+  return $data->{'subdirectories'} if ref($data->{'subdirectories'}) eq 'ARRAY';
+  return undef;
+}
+
+# Compute the list of package source directories. $subdirectories is the
+# manifest subdirectories array (undef means the top level). %entries maps a
+# base directory to the list of its top level entries, '' being the
+# repository root. Every entry inside any of the base directories is a
+# package source.
+sub package_source_dirs {
+  my ($subdirectories, %entries) = @_;
+  my @dirs;
+  if (ref($subdirectories) eq 'ARRAY' && @$subdirectories) {
+    for my $sub (@$subdirectories) {
+      next unless defined $sub;
+      my $base = $sub;
+      $base =~ s{^\./}{};
+      $base =~ s{/$}{};
+      push @dirs, map { "$base/$_" } grep { length } @{$entries{$base} || []};
+    }
+  } else {
+    push @dirs, grep { length } @{$entries{''} || []};
+  }
+  return \@dirs;
+}
+
+# Given the latest hash for each package source directory in the fork
+# (%hashes_a) and in the repository it was forked from (%hashes_b), return
+# the package source directories that differ or that do not exist in the
+# forked-from repository at all.
+sub changed_package_sources {
+  my ($dirs, $hashes_a, $hashes_b) = @_;
+  my @changed;
+  for my $dir (@$dirs) {
+    my $a = $hashes_a->{$dir};
+    next unless defined $a && length $a;
+    my $b = $hashes_b->{$dir};
+    push @changed, $dir if !defined $b || $a ne $b;
+  }
+  return \@changed;
+}
+
+# Append an onlybuild=... CGI parameter for each changed package source to a
+# scmsync url (GIT_URL#BRANCH), so a fork build only builds the packages that
+# actually changed. Returns the modified url unchanged when there is nothing
+# to restrict or when it already has an onlybuild parameter.
+sub scmsync_with_onlybuild {
+  my ($scmsync, $changed) = @_;
+  return $scmsync unless defined $scmsync;
+  return $scmsync unless ref($changed) eq 'ARRAY' && @$changed;
+  return $scmsync if $scmsync =~ /\?onlybuild=/;
+  my $params = join('&', map { "onlybuild=$_" } @$changed);
+  if ($scmsync =~ s{#}{?$params#}) {
+    return $scmsync;
+  }
+  return "$scmsync?$params";
+}
+
 # Build the $BSXML::proj conformant data structure for a list of presets.
 # $extrapaths is an optional hashref mapping repository name to a list of
 # additional {project, repository} path entries (e.g. for building a fork
