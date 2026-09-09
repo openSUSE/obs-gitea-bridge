@@ -81,12 +81,12 @@ like($xml, qr/<arch>x86_64<\/arch>/, 'xml arch 1');
 like($xml, qr/<arch>i586<\/arch>/, 'xml arch 2');
 
 is(BSPreset::preset_xml('p', [{ name => 'r', architectures => ['x86_64'] }]),
-   "<project name=\"p\">\n  <repository name=\"r\">\n    <arch>x86_64</arch>\n  </repository>\n</project>\n",
+   "<project name=\"p\">\n  <title/>\n  <description/>\n  <repository name=\"r\">\n    <arch>x86_64</arch>\n  </repository>\n</project>\n",
    'exact xml output for a single repository');
 
 is(BSPreset::preset_xml('p', []),
-   "<project name=\"p\"/>\n",
-   'empty presets produce a self-closing project element');
+   "<project name=\"p\">\n  <title/>\n  <description/>\n</project>\n",
+   'empty presets produce a project with empty title/description');
 
 # --- extrapaths (fork builds against upstream project) ---
 my $fp = BSPreset::preset_data('p',

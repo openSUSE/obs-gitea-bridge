@@ -49,7 +49,7 @@ sub manifest_presets {
 # against its upstream project).
 sub preset_data {
   my ($projectname, $presets, $extrapaths) = @_;
-  my $data = { 'name' => $projectname };
+  my $data = { 'name' => $projectname, 'title' => undef, 'description' => undef };
   my @repository;
   for my $preset (@$presets) {
     next unless ref($preset) eq 'HASH' && $preset->{'name'};

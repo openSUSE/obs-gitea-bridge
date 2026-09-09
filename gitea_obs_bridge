@@ -79,7 +79,7 @@ if (defined $api_username && defined $api_password) {
 
 # Fetch the download base url from the OBS api at startup and use it as
 # the prefix stripped from repo urls when deriving the OBS path
-# project/repository.
+# project/repository. Only needed for the analysing http server.
 eval {
   my $config = BSRPC::rpc({ 'uri' => "$obsurl/configuration",
                             'request' => 'GET',
@@ -89,7 +89,7 @@ eval {
   my $download_url = $config->{'download_url'};
   $BSPreset::gitprefix = $download_url if defined $download_url && length $download_url;
   print "using download_url $BSPreset::gitprefix\n";
-};
+} unless @ARGV;
 print "failed to read download_url from $obsurl/configuration: $@\n" if $@;
 
 sub repositoryresults {
@@ -313,6 +313,72 @@ sub parent_project_paths {
   return $extrapaths;
 }
 
+# Derive the owner/repo full name from a git url.
+sub giturl_to_fullname {
+  my ($url) = @_;
+  return undef unless defined $url;
+  my $path;
+  if ($url =~ m{^(?:https?|ssh|git)://[^/]+/(.+)$}) {
+    $path = $1;
+  } elsif ($url =~ m{^[^@/]+@[^:]+:(.+)$}) {
+    $path = $1;
+  } else {
+    return undef;
+  }
+  $path =~ s/\.git$//;
+  $path =~ s{/+$}{};
+  return $path;
+}
+
+# Resolve a "GIT_URL#BRANCH" spec into the project name and the manifest
+# content taken from the given branch.
+sub resolve_project_spec {
+  my ($spec) = @_;
+  my ($giturl, $branch) = split(/#/, $spec, 2);
+  die("invalid '$spec', expected GIT_URL#BRANCH_NAME\n")
+    unless defined $giturl && length $giturl && defined $branch && length $branch;
+  $branch = gitref_to_branch($branch);
+  die("invalid '$spec', expected GIT_URL#BRANCH_NAME\n") unless defined $branch;
+  my $fullname = giturl_to_fullname($giturl);
+  die("cannot determine org/repo from git url '$giturl'\n") unless defined $fullname;
+  die("autosetup_prefix is not configured\n") unless defined $autosetup_prefix;
+
+  my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
+  my $manifest;
+  if (open(my $fh, '-|', 'git', "--git-dir=$gitdir", 'show', "$branch:_manifest")) {
+    $manifest = do { local $/; <$fh> };
+    close($fh);
+    $manifest = undef if (($? >> 8) != 0);
+  }
+  die("cannot read _manifest from $giturl#$branch\n") unless defined $manifest;
+
+  my ($org, $repo) = split('/', $fullname, 2);
+  die("cannot determine org/repo from $fullname\n") unless defined $org && defined $repo;
+  $org =~ s/:/_/g;
+  $repo =~ s/:/_/g;
+  return ("$autosetup_prefix:$org:$repo:$branch", $manifest);
+}
+
+# Set up a single project for a given git branch, given as "GIT_URL#BRANCH".
+sub setup_single_project {
+  my ($spec) = @_;
+  my ($projectname, $manifest) = resolve_project_spec($spec);
+  setup_project($manifest, $projectname, undef);
+}
+
+# Print the project meta xml for a given git branch, given as "GIT_URL#BRANCH".
+sub show_single_project {
+  my ($spec) = @_;
+  my ($projectname, $manifest) = resolve_project_spec($spec);
+  my $presets = eval { BSPreset::manifest_presets($manifest) };
+  die("cannot parse _manifest: $@") if $@;
+  if ($presets && @$presets) {
+    print BSPreset::preset_xml($projectname, $presets);
+  } else {
+    print "no project configured for $spec\n";
+  }
+}
+
 sub repositoryevent {
   die("need event data as content\n") unless BSServer::have_content();
   my $batch_json = BSServer::read_data(10000000);
@@ -372,6 +438,22 @@ my $conf = {
   'setkeepalive' => 1,
   'maxchild' => 20,
 };
+
+# single-shot mode: setup or show a single project for a given git branch,
+# then exit without starting the server
+if (@ARGV) {
+  if ($ARGV[0] eq '--setup-project') {
+    die("usage: $0 --setup-project GIT_URL#BRANCH_NAME\n") unless $ARGV[1];
+    setup_single_project($ARGV[1]);
+    exit(0);
+  }
+  if ($ARGV[0] eq '--show-project') {
+    die("usage: $0 --show-project GIT_URL#BRANCH_NAME\n") unless $ARGV[1];
+    show_single_project($ARGV[1]);
+    exit(0);
+  }
+  die("unknown option $ARGV[0], usage: $0 [--setup-project GIT_URL#BRANCH_NAME | --show-project GIT_URL#BRANCH_NAME]\n");
+}
 
 # ensure queue directory exists
 mkdir($queue_dir) or die("cannot create queue directory $queue_dir: $!\n") unless -d $queue_dir;
