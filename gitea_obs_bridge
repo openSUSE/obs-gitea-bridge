@@ -36,11 +36,13 @@ BEGIN {
 
 use Data::Dumper;
 use JSON::XS ();
+use MIME::Base64 ();
 
 use BSServer;
 use BSRPC ':https';
 use BSDispatch;
 use BSXML;
+use BSPreset;
 
 use strict;
 
@@ -50,12 +52,45 @@ my $proto = 'http';
 my $obsurl = "https://api.opensuse.org/public";
 my $header = "X-SCM-BRIDGE-COOKIE: not_configured";
 my $queue_dir = "/srv/obs-gitea-bridge/queue";
+my $gitea_root = "/var/lib/gitea/data";
+my $autosetup_prefix;
+my $api_username;
+my $api_password;
 eval {
   use config;
   $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie" if $config::shared_cookie;
   $obsurl = $config::obsurl;
   $queue_dir = $config::queue_dir if $config::queue_dir;
+  $gitea_root = $config::gitea_root if $config::gitea_root;
+  $autosetup_prefix = $config::autosetup_prefix if $config::autosetup_prefix;
+  $api_username = $config::api_username if defined $config::api_username;
+  $api_password = $config::api_password if defined $config::api_password;
 };
+
+# OBS api base url without a trailing /public marker, used for the
+# authenticated project meta operations below.
+(my $source_url = $obsurl) =~ s{/public$}{};
+
+# HTTP Basic Auth header for project meta create/delete operations.
+my $api_auth;
+if (defined $api_username && defined $api_password) {
+  $api_auth = 'Authorization: Basic '.MIME::Base64::encode_base64("$api_username:$api_password", '');
+}
+
+# Fetch the download base url from the OBS api at startup and use it as
+# the prefix stripped from repo urls when deriving the OBS path
+# project/repository.
+eval {
+  my $config = BSRPC::rpc({ 'uri' => "$obsurl/configuration",
+                            'request' => 'GET',
+                            'headers' => [$header],
+                            'timeout' => 30 },
+                          $BSXML::configuration);
+  my $download_url = $config->{'download_url'};
+  $BSPreset::gitprefix = $download_url if defined $download_url && length $download_url;
+  print "using download_url $BSPreset::gitprefix\n";
+};
+print "failed to read download_url from $obsurl/configuration: $@\n" if $@;
 
 sub repositoryresults {
   my ($cgi) = @_;
@@ -112,6 +147,15 @@ sub repositoryresults {
   return $html;
 }
 
+sub gitref_to_branch {
+  my ($ref) = @_;
+  return undef unless defined $ref;
+  $ref =~ s/^refs\/heads\///;
+  $ref =~ s/^refs\/tags\///;
+  $ref =~ s/^refs\///;
+  return $ref;
+}
+
 sub process_queue {
   return unless -d $queue_dir;
 
@@ -126,10 +170,28 @@ sub process_queue {
     my $batch = JSON::XS::decode_json($content);
     next unless $batch && $batch->{'ref'} && $batch->{'repository'}->{'clone_url'};
 
-    my $branch = $batch->{'ref'};
-    $branch =~ s/^refs\/heads\///;
-    $branch =~ s/^refs\/tags\///;
-    $branch =~ s/^refs\///;
+    my $branch = gitref_to_branch($batch->{'ref'});
+
+    my $fullname = $batch->{'repository'}->{'full_name'};
+    if ($fullname && defined $autosetup_prefix) {
+      my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
+      my $manifest;
+      if (open(my $fh, '-|', 'git', "--git-dir=$gitdir", 'show', "$branch:_manifest")) {
+        $manifest = do { local $/; <$fh> };
+        close($fh);
+        $manifest = undef if (($? >> 8) != 0);
+      }
+      if (defined $manifest) {
+        my ($org, $repo) = split('/', $fullname, 2);
+        if (!defined $org || !defined $repo) {
+          print "setup_project: cannot determine org/repo from $fullname\n";
+        } else {
+          $org =~ s/:/_/g;
+          $repo =~ s/:/_/g;
+          setup_project($manifest, "$autosetup_prefix:$org:$repo:$branch", $batch);
+        }
+      }
+    }
 
     my $cgi = { 'cmd'           => 'triggerscmsync',
 		'scmrepository' => $batch->{'repository'}->{'clone_url'},
@@ -138,10 +200,10 @@ sub process_queue {
     my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch', 'isdefaultbranch');
 
     eval {
-      my $h = BSRPC::rpc({'uri' => "$obsurl/source",
+      my $h = BSRPC::rpc({ 'uri' => "$obsurl/source",
       		  	   'request' => 'POST',
       		  	   'headers' => [$header],
-      		  	   'timeout' => 30}, undef, @args);
+      		  	   'timeout' => 30 }, undef, @args);
     };
     if ($@) {
       print "Queue: failed to process $file: $@\n";
@@ -151,6 +213,104 @@ sub process_queue {
       print "Processed: $batch->{'repository'}->{'clone_url'}#$branch from $file\n";
     }
   }
+}
+
+sub setup_project {
+  my ($manifest, $projectname, $batch) = @_;
+  my $presets = eval { BSPreset::manifest_presets($manifest) };
+  if ($@) {
+    print "setup_project: $@";
+    return;
+  }
+  if ($presets && @$presets) {
+    create_or_update_project($projectname, $presets, $batch);
+  } else {
+    delete_project($projectname);
+  }
+}
+
+sub delete_project {
+  my ($projectname) = @_;
+  print "delete_project: deleting project $projectname\n";
+  my @hdrs = defined $api_auth ? ($api_auth) : ();
+  eval {
+    BSRPC::rpc({ 'uri' => "$source_url/source/$projectname/_meta",
+    		  	   'request' => 'DELETE',
+    		  	   'headers' => \@hdrs,
+    		  	   'timeout' => 30 }, undef);
+  };
+  print "delete_project: failed to delete $projectname: $@\n" if $@;
+}
+
+sub create_or_update_project {
+  my ($projectname, $presets, $batch) = @_;
+
+  my $extrapaths = parent_project_paths($projectname, $presets, $batch);
+  my $xml = eval { BSPreset::preset_xml($projectname, $presets, $extrapaths) };
+  if ($@) {
+    print "create_or_update_project: cannot build project xml for $projectname: $@\n";
+    return;
+  }
+  print "create_or_update_project: project xml for $projectname:\n$xml";
+
+  my @hdrs = ('Content-Type: text/xml');
+  push @hdrs, $api_auth if defined $api_auth;
+  eval {
+    BSRPC::rpc({ 'uri' => "$source_url/source/$projectname/_meta",
+    		  	   'request' => 'POST',
+    		  	   'headers' => \@hdrs,
+    		  	   'timeout' => 30,
+    		  	   'data' => $xml }, undef);
+  };
+  print "create_or_update_project: failed to update $projectname: $@\n" if $@;
+}
+
+# Read the project meta of $projectname from the OBS api.
+sub get_project_meta {
+  my ($projectname) = @_;
+  my @hdrs = defined $api_auth ? ($api_auth) : ();
+  my $meta;
+  eval {
+    $meta = BSRPC::rpc({ 'uri' => "$source_url/source/$projectname/_meta",
+    		  	   'request' => 'GET',
+    		  	   'headers' => \@hdrs,
+    		  	   'timeout' => 30 },
+    		  	   $BSXML::proj);
+  };
+  return ($meta, $@);
+}
+
+# If the git repository was forked from another one, look up the upstream
+# project (PREFIX:ORG:REPO:BRANCH) in OBS and return additional path entries
+# for each preset repository that points into it. Returns undef when the
+# repository is not a fork or the upstream project does not exist.
+sub parent_project_paths {
+  my ($projectname, $presets, $batch) = @_;
+  return undef unless ref($batch) eq 'HASH' && defined $autosetup_prefix;
+  my $parent = $batch->{'repository'}{'parent'};
+  return undef unless ref($parent) eq 'HASH' && $parent->{'full_name'};
+  my ($p_org, $p_repo) = split('/', $parent->{'full_name'}, 2);
+  return undef unless defined $p_org && defined $p_repo;
+  my $branch = gitref_to_branch($batch->{'ref'});
+  return undef unless defined $branch;
+  $p_org =~ s/:/_/g;
+  $p_repo =~ s/:/_/g;
+  my $parent_project = "$autosetup_prefix:$p_org:$p_repo:$branch";
+  my ($pmeta, $err) = get_project_meta($parent_project);
+  if ($err) {
+    print "create_or_update_project: upstream project $parent_project not found, building $projectname without extra paths: $err";
+    return undef;
+  }
+  my %parent_repos = map { $_->{'name'} => 1 } grep { $_->{'name'} } @{$pmeta->{'repository'} || []};
+  my $extrapaths;
+  for my $preset (@$presets) {
+    next unless ref($preset) eq 'HASH' && $preset->{'name'};
+    next unless $parent_repos{$preset->{'name'}};
+    print "create_or_update_project: building $projectname against upstream project $parent_project\n";
+    $extrapaths = {} unless $extrapaths;
+    push @{$extrapaths->{$preset->{'name'}}}, { 'project' => $parent_project, 'repository' => $preset->{'name'} };
+  }
+  return $extrapaths;
 }
 
 sub repositoryevent {

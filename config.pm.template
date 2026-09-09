@@ -4,6 +4,11 @@ package config;
 # configure the same string on your api server
 our $shared_cookie = 'my_private_cookie_string';
 
+# HTTP Basic Auth credentials for the OBS api. These are used to create and
+# delete _manifest projects (project meta is written via the api).
+# our $api_username = 'bridge';
+# our $api_password = 'secret';
+
 # configure your OBS server interface. It needs to be an OBS 2.11 at least.
 # By default, assume that we run on the same system as the OBS source server
 our $obsurl        = 'http://localhost:5352';
@@ -13,5 +18,14 @@ our $obsurl        = 'http://localhost:5352';
 
 # We queue events local to avoid losses when source server is not reachable
 # our $queue_dir     = '/srv/obs-gitea-bridge/queue';
+
+# We run on the gitea server itself, so repositories can be read directly
+# from the git object store for the _manifest lookup.
+# our $gitea_root    = '/var/lib/gitea/data';
+
+# Auto-setup _manifest projects with build repository configuration.
+# We need to do this below a fixed namespace prefix. Define one to enable
+# this. Projects are created as PREFIX:ORGANISATION:REPOSITORY:BRANCH.
+# our $autosetup_prefix = 'git';
 
 1;
