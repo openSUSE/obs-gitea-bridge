@@ -188,7 +188,8 @@ sub process_queue {
         } else {
           $org =~ s/:/_/g;
           $repo =~ s/:/_/g;
-          setup_project($manifest, "$autosetup_prefix:$org:$repo:$branch", $batch);
+          my $scmsync = "$batch->{'repository'}->{'clone_url'}#$branch";
+          setup_project($manifest, "$autosetup_prefix:$org:$repo:$branch", $batch, $scmsync);
         }
       }
     }
@@ -216,14 +217,14 @@ sub process_queue {
 }
 
 sub setup_project {
-  my ($manifest, $projectname, $batch) = @_;
+  my ($manifest, $projectname, $batch, $scmsync) = @_;
   my $presets = eval { BSPreset::manifest_presets($manifest) };
   if ($@) {
     print "setup_project: $@";
     return;
   }
   if ($presets && @$presets) {
-    create_or_update_project($projectname, $presets, $batch);
+    create_or_update_project($projectname, $presets, $batch, $scmsync);
   } else {
     delete_project($projectname);
   }
@@ -243,10 +244,10 @@ sub delete_project {
 }
 
 sub create_or_update_project {
-  my ($projectname, $presets, $batch) = @_;
+  my ($projectname, $presets, $batch, $scmsync) = @_;
 
   my $extrapaths = parent_project_paths($projectname, $presets, $batch);
-  my $xml = eval { BSPreset::preset_xml($projectname, $presets, $extrapaths) };
+  my $xml = eval { BSPreset::preset_xml($projectname, $presets, $extrapaths, $scmsync) };
   if ($@) {
     print "create_or_update_project: cannot build project xml for $projectname: $@\n";
     return;
@@ -356,24 +357,24 @@ sub resolve_project_spec {
   die("cannot determine org/repo from $fullname\n") unless defined $org && defined $repo;
   $org =~ s/:/_/g;
   $repo =~ s/:/_/g;
-  return ("$autosetup_prefix:$org:$repo:$branch", $manifest);
+  return ("$autosetup_prefix:$org:$repo:$branch", $manifest, "$giturl#$branch");
 }
 
 # Set up a single project for a given git branch, given as "GIT_URL#BRANCH".
 sub setup_single_project {
   my ($spec) = @_;
-  my ($projectname, $manifest) = resolve_project_spec($spec);
-  setup_project($manifest, $projectname, undef);
+  my ($projectname, $manifest, $scmsync) = resolve_project_spec($spec);
+  setup_project($manifest, $projectname, undef, $scmsync);
 }
 
 # Print the project meta xml for a given git branch, given as "GIT_URL#BRANCH".
 sub show_single_project {
   my ($spec) = @_;
-  my ($projectname, $manifest) = resolve_project_spec($spec);
+  my ($projectname, $manifest, $scmsync) = resolve_project_spec($spec);
   my $presets = eval { BSPreset::manifest_presets($manifest) };
   die("cannot parse _manifest: $@") if $@;
   if ($presets && @$presets) {
-    print BSPreset::preset_xml($projectname, $presets);
+    print BSPreset::preset_xml($projectname, $presets, undef, $scmsync);
   } else {
     print "no project configured for $spec\n";
   }

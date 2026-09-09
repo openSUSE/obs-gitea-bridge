@@ -46,10 +46,12 @@ sub manifest_presets {
 # Build the $BSXML::proj conformant data structure for a list of presets.
 # $extrapaths is an optional hashref mapping repository name to a list of
 # additional {project, repository} path entries (e.g. for building a fork
-# against its upstream project).
+# against its upstream project). $scmsync is an optional GIT_URL#BRANCH
+# value put into the project's scmsync element.
 sub preset_data {
-  my ($projectname, $presets, $extrapaths) = @_;
+  my ($projectname, $presets, $extrapaths, $scmsync) = @_;
   my $data = { 'name' => $projectname, 'title' => undef, 'description' => undef };
+  $data->{'scmsync'} = $scmsync if defined $scmsync && length $scmsync;
   my @repository;
   for my $preset (@$presets) {
     next unless ref($preset) eq 'HASH' && $preset->{'name'};
@@ -85,8 +87,8 @@ $repo->{'path'} = \@path if @path;
 
 # Serialize a list of presets into a project xml string.
 sub preset_xml {
-  my ($projectname, $presets, $extrapaths) = @_;
-  return XMLout($BSXML::proj, preset_data($projectname, $presets, $extrapaths));
+  my ($projectname, $presets, $extrapaths, $scmsync) = @_;
+  return XMLout($BSXML::proj, preset_data($projectname, $presets, $extrapaths, $scmsync));
 }
 
 1;

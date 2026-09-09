@@ -101,4 +101,11 @@ my $fx = BSPreset::preset_xml('p', [{ name => 'r' }],
   { r => [ { project => 'git:Owner:Upstream:main', repository => 'r' } ] });
 like($fx, qr/<path project="git:Owner:Upstream:main" repository="r"\/>/, 'xml contains upstream path');
 
+# --- scmsync ---
+my $fs = BSPreset::preset_xml('p', [{ name => 'r' }], undef, 'https://gitea.example.com/owner/repo.git#main');
+like($fs, qr/<scmsync>https:\/\/gitea\.example\.com\/owner\/repo\.git#main<\/scmsync>/, 'xml contains scmsync element');
+my $fsd = BSPreset::preset_data('p', [{ name => 'r' }], undef, 'x#y');
+is($fsd->{scmsync}, 'x#y', 'scmsync stored in data');
+ok(!exists(BSPreset::preset_data('p', [{ name => 'r' }])->{scmsync}), 'no scmsync when not given');
+
 done_testing();
