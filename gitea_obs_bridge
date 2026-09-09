@@ -155,6 +155,26 @@ sub gitref_to_branch {
   return $ref;
 }
 
+# Read the given file from the given branch of a git repository. Returns
+# undef when the repository or the file does not exist (git's error output
+# is suppressed).
+sub git_show {
+  my ($gitdir, $branch, $file) = @_;
+  my $pid = open(my $fh, '-|');
+  if (!defined $pid) {
+    die("cannot fork: $!\n");
+  }
+  if ($pid == 0) {
+    open(STDERR, '>', '/dev/null');
+    exec('git', "--git-dir=$gitdir", 'show', "$branch:$file");
+    exit 255;
+  }
+  my $data = do { local $/; <$fh> };
+  close($fh);
+  return undef if ($? >> 8) != 0;
+  return $data;
+}
+
 sub process_queue {
   return unless -d $queue_dir;
 
@@ -174,12 +194,7 @@ sub process_queue {
     my $fullname = $batch->{'repository'}->{'full_name'};
     if ($fullname && defined $autosetup_prefix) {
       my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
-      my $manifest;
-      if (open(my $fh, '-|', 'git', "--git-dir=$gitdir", 'show', "$branch:_manifest")) {
-        $manifest = do { local $/; <$fh> };
-        close($fh);
-        $manifest = undef if (($? >> 8) != 0);
-      }
+      my $manifest = git_show($gitdir, $branch, '_manifest');
       if (defined $manifest) {
         my ($org, $repo) = split('/', $fullname, 2);
         if (!defined $org || !defined $repo) {
@@ -188,7 +203,10 @@ sub process_queue {
           $org =~ s/:/_/g;
           $repo =~ s/:/_/g;
           my $scmsync = "$batch->{'repository'}->{'clone_url'}#$branch";
-          setup_project($manifest, "$autosetup_prefix:$org:$repo:$branch", $batch, $scmsync);
+          eval {
+            setup_project($manifest, "$autosetup_prefix:$org:$repo:$branch", $batch, $scmsync);
+          };
+          print "setup_project: failed: $@" if $@;
         }
       }
     }
@@ -344,12 +362,7 @@ sub resolve_project_spec {
   die("autosetup_prefix is not configured\n") unless defined $autosetup_prefix;
 
   my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
-  my $manifest;
-  if (open(my $fh, '-|', 'git', "--git-dir=$gitdir", 'show', "$branch:_manifest")) {
-    $manifest = do { local $/; <$fh> };
-    close($fh);
-    $manifest = undef if (($? >> 8) != 0);
-  }
+  my $manifest = git_show($gitdir, $branch, '_manifest');
   die("cannot read _manifest from $giturl#$branch\n") unless defined $manifest;
 
   my ($org, $repo) = split('/', $fullname, 2);
