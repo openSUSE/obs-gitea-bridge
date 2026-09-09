@@ -94,14 +94,25 @@ sub changed_package_sources {
 
 # Append an onlybuild=... CGI parameter for each changed package source to a
 # scmsync url (GIT_URL#BRANCH), so a fork build only builds the packages that
-# actually changed. Returns the modified url unchanged when there is nothing
-# to restrict or when it already has an onlybuild parameter.
+# actually changed. Package sources may live below manifest subdirectories; the
+# onlybuild parameter takes the package name (the last path component), not
+# the subdirectory path. Returns the modified url unchanged when there is
+# nothing to restrict or when it already has an onlybuild parameter.
 sub scmsync_with_onlybuild {
   my ($scmsync, $changed) = @_;
   return $scmsync unless defined $scmsync;
   return $scmsync unless ref($changed) eq 'ARRAY' && @$changed;
   return $scmsync if $scmsync =~ /\?onlybuild=/;
-  my $params = join('&', map { "onlybuild=$_" } @$changed);
+  my @packages;
+  my %seen;
+  for my $dir (@$changed) {
+    next unless defined $dir && length $dir;
+    (my $pkg = $dir) =~ s{.*/}{};
+    next unless length $pkg && !$seen{$pkg}++;
+    push @packages, $pkg;
+  }
+  return $scmsync unless @packages;
+  my $params = join('&', map { "onlybuild=$_" } @packages);
   if ($scmsync =~ s{#}{?$params#}) {
     return $scmsync;
   }

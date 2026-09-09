@@ -80,6 +80,10 @@ is_deeply($unchanged, [], 'unchanged packages detected');
 is(BSPreset::scmsync_with_onlybuild('https://gitea.example.com/o/r.git#main', ['pkg1', 'pkg2']),
    'https://gitea.example.com/o/r.git?onlybuild=pkg1&onlybuild=pkg2#main',
    'onlybuild params added before the branch fragment');
+is(BSPreset::scmsync_with_onlybuild('https://gitea.example.com/o/r.git#main',
+   ['devel_area_A/hello', 'devel_area_B/git-example-1', 'devel_area_A/git-example-1']),
+   'https://gitea.example.com/o/r.git?onlybuild=hello&onlybuild=git-example-1#main',
+   'only the package name is used, duplicate names are collapsed');
 is(BSPreset::scmsync_with_onlybuild('https://gitea.example.com/o/r.git#main', []),
    'https://gitea.example.com/o/r.git#main',
    'no changed packages -> scmsync unchanged');
