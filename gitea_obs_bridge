@@ -510,20 +510,26 @@ sub setup_package_set_project {
 
 # Delete a project with all its packages from OBS. Deleting the project meta
 # alone would leave the packages behind, a delete on the project source purges
-# the whole project.
+# the whole project. The delete is forced, OBS otherwise refuses to remove a
+# project while repositories path-depend on it, e.g. through self referencing
+# path entries. The delete is a cleanup: a project which does not exist is no
+# error. Logs exactly one line about the outcome.
 sub delete_project {
   my ($projectname) = @_;
-  print "delete_project: deleting project $projectname\n";
   my @hdrs = defined $api_auth ? ($api_auth) : ();
   eval {
     BSRPC::rpc({ 'uri' => "$source_url/source/$projectname",
     		  	   'request' => 'DELETE',
     		  	   'headers' => \@hdrs,
-    		  	   'timeout' => 30 }, undef);
+    		  	   'timeout' => 30 }, undef, BSRPC::args({'force' => '1'}, 'force'));
   };
-  if ($@) {
-    return 1 if $@ =~ /^404/;  # the project is gone already
-    print "delete_project: failed to delete $projectname: $@\n";
+  # the delete is only a cleanup, a project which is gone already is fine
+  if (!$@) {
+    print "delete_project: cleanup deleted project $projectname\n";
+  } elsif ($@ =~ /^404/) {
+    print "delete_project: cleanup found no project $projectname, nothing to delete\n";
+  } else {
+    print "delete_project: cleanup failed to delete $projectname: $@";
     return 0;
   }
   return 1;
