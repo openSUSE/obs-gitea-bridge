@@ -521,12 +521,6 @@ sub project_in_scope {
   return BSPreset::project_name_in_scope($autosetup_prefix, $projectname);
 }
 
-# True when $packagename is safe to put into the path of an api url.
-sub package_name_in_scope {
-  my ($packagename) = @_;
-  return BSPreset::package_name_in_scope($packagename);
-}
-
 # Delete a project with all its packages from OBS. Deleting the project meta
 # alone would leave the packages behind, a delete on the project source purges
 # the whole project. The delete is forced, OBS otherwise refuses to remove a
