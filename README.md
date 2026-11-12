@@ -17,6 +17,28 @@ Setup
 
       scm_bridge_cookie: YOUR_STRING
 
+Webhook
+=======
+
+The Gitea webhook pointing at the bridge's POST /repositoryevent endpoint
+should deliver push events, branch/tag creation and deletion, and repository
+events. The bridge classifies the delivered payloads:
+
+- push: sets up or updates the build project of the branch and triggers the
+  scmsync update in OBS
+- branch deleted: deletes the OBS project created for that branch
+- repository deleted: deletes the OBS projects created for all its branches
+- everything else (tag deletions, repository created or renamed, ...) is
+  acknowledged and ignored
+
+Deletions also clean up organisation wide package sets: packages synchronised
+from the deleted branch or repository are removed from the OBS projects of the
+other repositories of the organisation. Projects are purged including all
+their packages by a delete on the project source.
+
+Renaming a repository or a branch is not handled yet, the OBS projects of the
+old name stay around and must be removed manually.
+
 Permissions
 ===========
 

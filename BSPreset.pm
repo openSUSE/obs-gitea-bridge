@@ -25,7 +25,7 @@ use BSXML;
 
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix);
+our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix gitea_event_kind branch_project_name repo_project_prefix git_host scmsync_from_source);
 
 # Prefix stripped from repo URLs to derive the OBS path project/repository.
 # Made configurable via config.pm ($BSPreset::gitprefix).
@@ -331,6 +331,87 @@ sub extrapaths_from_parent_meta {
     }
   }
   return $extrapaths;
+}
+
+# Classify a Gitea webhook payload (the decoded json as hashref) into the kind
+# of event the bridge cares about:
+#   push           a push to a branch
+#   branch_delete  a branch was deleted
+#   tag_delete     a tag was deleted
+#   repo_delete    the repository itself was deleted
+#   repo_event     another repository event (created, renamed, archived, ...)
+# Branch and tag deletions arrive as "delete" events carrying a ref_type,
+# repository events carry an action. Payloads of older Gitea versions have no
+# event field; their delete events are then recognised by the absence of the
+# sha and master_branch fields which the corresponding create events have.
+# Returns undef when the payload cannot be classified.
+sub gitea_event_kind {
+  my ($batch) = @_;
+  return undef unless ref($batch) eq 'HASH';
+  my $event = $batch->{'event'};
+  my $action = $batch->{'action'};
+  if (defined $batch->{'ref_type'}) {
+    if (defined $event) {
+      return undef unless $event eq 'delete';
+    } else {
+      return undef if defined($batch->{'sha'}) || defined($batch->{'master_branch'});
+    }
+    return 'branch_delete' if $batch->{'ref_type'} eq 'branch';
+    return 'tag_delete'    if $batch->{'ref_type'} eq 'tag';
+    return 'other_delete';
+  }
+  if ((!defined($event) || $event eq 'repository') && defined $action) {
+    return $action eq 'deleted' ? 'repo_delete' : 'repo_event';
+  }
+  if (!defined($event) || $event eq 'push') {
+    my $repository = $batch->{'repository'};
+    return 'push' if defined($batch->{'ref'}) && ref($repository) eq 'HASH' && defined($repository->{'clone_url'});
+  }
+  return undef;
+}
+
+# Build the OBS project name of a git branch: $prefix:$org:$repo:$branch,
+# with ':' in the organisation and repository name replaced by '_' like
+# everywhere else in the bridge. Returns undef on missing arguments.
+sub branch_project_name {
+  my ($prefix, $org, $repo, $branch) = @_;
+  return undef unless defined($prefix) && defined($org) && defined($repo) && defined($branch);
+  (my $org2 = $org) =~ s/:/_/g;
+  (my $repo2 = $repo) =~ s/:/_/g;
+  return "$prefix:$org2:$repo2:$branch";
+}
+
+# Build the OBS project name prefix covering the branch projects of all
+# branches of a repository.
+sub repo_project_prefix {
+  my ($prefix, $org, $repo) = @_;
+  return undef unless defined($prefix) && defined($org) && defined($repo);
+  (my $org2 = $org) =~ s/:/_/g;
+  (my $repo2 = $repo) =~ s/:/_/g;
+  return "$prefix:$org2:$repo2:";
+}
+
+# Return the scheme://host (or user@host for scp style urls) part of a git
+# clone url, or undef when it cannot be determined.
+sub git_host {
+  my ($clone_url) = @_;
+  return undef unless defined $clone_url;
+  return $1 if $clone_url =~ m{^((?:https?|ssh|git)://(?:[^@/]+@)?[^/]+)};
+  return $1 if $clone_url =~ m{^([^@/]+\@[^:/]+):};
+  return undef;
+}
+
+# True when a package level scmsync url synchronises from the repository
+# $org/$repo on the gitea host $host, restricted to $branch when one is given.
+# The branch part of the url may be followed by query parameters.
+sub scmsync_from_source {
+  my ($scmsync, $host, $org, $repo, $branch) = @_;
+  return 0 unless defined($scmsync) && defined($host) && defined($org) && defined($repo);
+  my $base = "$host/$org/$repo";
+  if (defined $branch && length $branch) {
+    return $scmsync =~ m{^\Q$base\E(?:\.git)?\#\Q$branch\E(?:\?|$)} ? 1 : 0;
+  }
+  return $scmsync =~ m{^\Q$base\E(?:\.git)?\#} ? 1 : 0;
 }
 
 1;

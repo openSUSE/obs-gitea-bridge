@@ -257,9 +257,7 @@ sub process_org_package_sets {
     next unless $resolved->{'organisation'} eq $org;
     # only sets covering the branch of this event concern us here
     next unless $resolved->{'branch'} eq $branch || $resolved->{'branch'} eq 'default';
-    (my $org2 = $org) =~ s/:/_/g;
-    (my $repo2 = $name) =~ s/:/_/g;
-    my $projectname = "$autosetup_prefix:$org2:$repo2:$branch";
+    my $projectname = BSPreset::branch_project_name($autosetup_prefix, $org, $name, $branch);
     eval {
       setup_package_set_project($projectname, BSPreset::manifest_presets($manifest), undef, "$manifest_clone#$branch", $set);
     };
@@ -279,62 +277,177 @@ sub process_queue {
     my $filepath = "$queue_dir/$file";
     my $content = do { local $/; open(my $fh, '<', $filepath) or next; binmode($fh); <$fh> };
     my $batch = JSON::XS::decode_json($content);
-    next unless $batch && $batch->{'ref'} && $batch->{'repository'}->{'clone_url'};
+    my $kind = BSPreset::gitea_event_kind($batch);
+    my $repository = ref($batch) eq 'HASH' ? $batch->{'repository'} : undef;
+    my $fullname = ref($repository) eq 'HASH' ? $repository->{'full_name'} : undef;
+    my $clone_url = ref($repository) eq 'HASH' ? $repository->{'clone_url'} : undef;
 
-    my $branch = gitref_to_branch($batch->{'ref'});
-
-    my $fullname = $batch->{'repository'}->{'full_name'};
-    my $clone_url = $batch->{'repository'}->{'clone_url'};
-    my $own_set;
-    if ($fullname && defined $autosetup_prefix) {
-      my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
-      my $manifest = git_show($gitdir, $branch, '_manifest');
-      if (!defined $manifest) {
-        my $aerr = BSGit::repo_access_error($gitdir);
-        print "Queue: $aerr" if $aerr;
-      }
-      if (defined $manifest) {
-        $own_set = eval { BSPreset::manifest_package_set($manifest) };
-        print "Queue: invalid package_set in $fullname#$branch: $@\n" if $@;
-        my ($org, $repo) = split('/', $fullname, 2);
-        if (!defined $org || !defined $repo) {
-          print "setup_project: cannot determine org/repo from $fullname\n";
-        } else {
-          $org =~ s/:/_/g;
-          $repo =~ s/:/_/g;
-          my $scmsync = "$batch->{'repository'}->{'clone_url'}#$branch";
-          eval {
-            setup_project($manifest, "$autosetup_prefix:$org:$repo:$branch", $batch, $scmsync);
-          };
-          print "setup_project: failed: $@" if $@;
-        }
-      }
-    }
-
-    # pushes to the other repositories of an organisation wide package_set
-    # refresh the package list of the organisation project as well
-    process_org_package_sets($fullname, $branch, $clone_url) unless defined $own_set;
-
-    my $cgi = { 'cmd'           => 'triggerscmsync',
-		'scmrepository' => $batch->{'repository'}->{'clone_url'},
-		'scmbranch'     => $branch };
-    $cgi->{'isdefaultbranch'} = 1 if $batch->{'repository'}->{'default_branch'} eq $branch;
-    my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch', 'isdefaultbranch');
-
-    eval {
-      my $h = BSRPC::rpc({ 'uri' => "$obsurl/source",
-      		  	   'request' => 'POST',
-      		  	   'headers' => [$header],
-      		  	   'timeout' => 30 }, undef, @args);
-    };
-    if ($@) {
-      print "Queue: failed to process $file: $@\n";
-      last;
+    my $ok = 1;
+    if (!defined($kind)) {
+      print "Queue: ignoring unsupported event in $file\n";
+    } elsif ($kind eq 'branch_delete') {
+      $ok = handle_branch_delete($fullname, $clone_url, gitref_to_branch($batch->{'ref'}));
+    } elsif ($kind eq 'repo_delete') {
+      $ok = handle_repo_delete($fullname, $clone_url);
+    } elsif ($kind eq 'push') {
+      $ok = handle_push($batch, $fullname, $clone_url);
     } else {
-      unlink($filepath) or print "Queue: failed to delete $filepath: $!\n";
-      print "Processed: $batch->{'repository'}->{'clone_url'}#$branch from $file\n";
+      # tag deletions and other repository events do not affect our projects
+      print "Queue: ignoring $kind event in $file\n";
+    }
+    unless ($ok) {
+      print "Queue: failed to process $file, keeping it for a later retry\n";
+      last;
+    }
+    unlink($filepath) or print "Queue: failed to delete $filepath: $!\n";
+    print "Processed: $kind event for " . (defined($clone_url) ? $clone_url : $fullname) . " from $file\n";
+  }
+}
+
+# Handle a push event: create or update the OBS project of the pushed branch
+# from its _manifest, refresh the organisation wide package sets this
+# repository may be part of and trigger the scmsync update in OBS. Returns
+# false when the event could not be processed and should be retried later.
+sub handle_push {
+  my ($batch, $fullname, $clone_url) = @_;
+  return 1 unless defined($clone_url) && length($clone_url);
+  my $branch = gitref_to_branch($batch->{'ref'});
+  my $own_set;
+  if ($fullname && defined $autosetup_prefix) {
+    my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
+    my $manifest = git_show($gitdir, $branch, '_manifest');
+    if (!defined $manifest) {
+      my $aerr = BSGit::repo_access_error($gitdir);
+      print "Queue: $aerr" if $aerr;
+    }
+    if (defined $manifest) {
+      $own_set = eval { BSPreset::manifest_package_set($manifest) };
+      print "Queue: invalid package_set in $fullname#$branch: $@\n" if $@;
+      my ($org, $repo) = split('/', $fullname, 2);
+      if (!defined $org || !defined $repo) {
+        print "setup_project: cannot determine org/repo from $fullname\n";
+      } else {
+        my $scmsync = "$clone_url#$branch";
+        eval {
+          setup_project($manifest, BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch), $batch, $scmsync);
+        };
+        print "setup_project: failed: $@" if $@;
+      }
     }
   }
+
+  # pushes to the other repositories of an organisation wide package_set
+  # refresh the package list of the organisation project as well
+  process_org_package_sets($fullname, $branch, $clone_url) unless defined $own_set;
+
+  my $cgi = { 'cmd'           => 'triggerscmsync',
+		'scmrepository' => $clone_url,
+		'scmbranch'     => $branch };
+  $cgi->{'isdefaultbranch'} = 1 if $batch->{'repository'}->{'default_branch'} eq $branch;
+  my @args = BSRPC::args($cgi, 'cmd', 'scmrepository', 'scmbranch', 'isdefaultbranch');
+
+  eval {
+    my $h = BSRPC::rpc({ 'uri' => "$obsurl/source",
+    		  	   'request' => 'POST',
+    		  	   'headers' => [$header],
+    		  	   'timeout' => 30 }, undef, @args);
+  };
+  if ($@) {
+    print "Queue: failed to trigger the scmsync update for $clone_url#$branch: $@\n";
+    return 0;
+  }
+  return 1;
+}
+
+# A branch of $fullname was deleted on the gitea side: delete the OBS project
+# created for that branch and remove the packages synchronised from it out of
+# the organisation wide package set projects.
+sub handle_branch_delete {
+  my ($fullname, $clone_url, $branch) = @_;
+  return 1 unless defined $autosetup_prefix;
+  my ($org, $repo) = split('/', $fullname // '', 2);
+  if (!defined($org) || !length($org) || !defined($repo) || !length($repo) || !defined($branch) || !length($branch)) {
+    print "branch_delete: cannot determine org, repo or branch of $fullname#$branch\n";
+    return 1;
+  }
+  print "branch_delete: $org/$repo#$branch was deleted\n";
+  my $failed;
+  my $projectname = BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch);
+  my (undef, $err) = get_project_meta($projectname);
+  if ($err) {
+    # a network problem deserves a retry, a missing project is fine
+    return 0 unless $err =~ /^404/;
+    print "branch_delete: project $projectname does not exist in OBS\n";
+  } else {
+    delete_project($projectname) or $failed = 1;
+  }
+  purge_org_packages($org, $repo, $branch, $clone_url) or $failed = 1;
+  return !$failed;
+}
+
+# The repository $fullname was deleted on the gitea side: delete all OBS
+# projects created for its branches and remove its packages out of the
+# organisation wide package set projects.
+sub handle_repo_delete {
+  my ($fullname, $clone_url) = @_;
+  return 1 unless defined $autosetup_prefix;
+  my ($org, $repo) = split('/', $fullname // '', 2);
+  if (!defined($org) || !length($org) || !defined($repo) || !length($repo)) {
+    print "repo_delete: cannot determine org and repo of $fullname\n";
+    return 1;
+  }
+  print "repo_delete: $org/$repo was deleted\n";
+  my $failed;
+  my ($projects, $err) = search_projects(BSPreset::repo_project_prefix($autosetup_prefix, $org, $repo));
+  if (!defined $projects) {
+    print "repo_delete: cannot list the OBS projects of $org/$repo: $err\n";
+    return 0;
+  }
+  delete_project($_) or $failed = 1 for @$projects;
+  purge_org_packages($org, $repo, undef, $clone_url) or $failed = 1;
+  return !$failed;
+}
+
+# Remove the packages synchronised from $org/$repo, restricted to $branch when
+# one is given, out of the OBS projects of the rest of the organisation. This
+# keeps organisation wide package set projects in shape when a member
+# repository or one of its branches is gone. $clone_url is any clone url on
+# the gitea instance, it restricts the removal to repositories of that
+# instance.
+sub purge_org_packages {
+  my ($org, $repo, $branch, $clone_url) = @_;
+  return 1 unless defined $autosetup_prefix;
+  my $host = BSPreset::git_host($clone_url);
+  if (!defined $host) {
+    print "purge: cannot determine the gitea host of $clone_url, keeping the organisation projects\n";
+    return 1;
+  }
+  (my $org2 = $org) =~ s/:/_/g;
+  my ($projects, $err) = search_projects("$autosetup_prefix:$org2:");
+  if (!defined $projects) {
+    print "purge: cannot list the OBS projects of $org: $err\n";
+    return 0;
+  }
+  # projects of the deleted repository itself get handled as a whole
+  my $own_prefix = BSPreset::repo_project_prefix($autosetup_prefix, $org, $repo);
+  my $failed;
+  for my $projectname (grep { index($_, $own_prefix) != 0 } @$projects) {
+    my ($names, $err) = get_project_packages($projectname);
+    if (!defined $names) {
+      print "purge: cannot list packages of $projectname: $err\n";
+      $failed = 1;
+      next;
+    }
+    for my $packagename (@$names) {
+      my ($meta, $err) = get_package_meta($projectname, $packagename);
+      next if $err;
+      my $scmsync = ref($meta) eq 'HASH' ? $meta->{'scmsync'} : undef;
+      next unless BSPreset::scmsync_from_source($scmsync, $host, $org, $repo, $branch);
+      print "purge: deleting package $projectname/$packagename\n";
+      delete_package($projectname, $packagename) or $failed = 1;
+    }
+  }
+  return !$failed;
 }
 
 sub setup_project {
@@ -395,17 +508,76 @@ sub setup_package_set_project {
   reconcile_package_set($projectname, $resolved, $members, $clone_url);
 }
 
+# Delete a project with all its packages from OBS. Deleting the project meta
+# alone would leave the packages behind, a delete on the project source purges
+# the whole project.
 sub delete_project {
   my ($projectname) = @_;
   print "delete_project: deleting project $projectname\n";
   my @hdrs = defined $api_auth ? ($api_auth) : ();
   eval {
-    BSRPC::rpc({ 'uri' => "$source_url/source/$projectname/_meta",
+    BSRPC::rpc({ 'uri' => "$source_url/source/$projectname",
     		  	   'request' => 'DELETE',
     		  	   'headers' => \@hdrs,
     		  	   'timeout' => 30 }, undef);
   };
-  print "delete_project: failed to delete $projectname: $@\n" if $@;
+  if ($@) {
+    return 1 if $@ =~ /^404/;  # the project is gone already
+    print "delete_project: failed to delete $projectname: $@\n";
+    return 0;
+  }
+  return 1;
+}
+
+# Remove a package with all its content from OBS.
+sub delete_package {
+  my ($projectname, $packagename) = @_;
+  my @hdrs = defined $api_auth ? ($api_auth) : ();
+  eval {
+    BSRPC::rpc({ 'uri' => "$source_url/source/$projectname/$packagename",
+    		  	   'request' => 'DELETE',
+    		  	   'headers' => \@hdrs,
+    		  	   'timeout' => 30 }, undef);
+  };
+  if ($@) {
+    return 1 if $@ =~ /^404/;  # the package is gone already
+    print "delete_package: failed to delete $projectname/$packagename: $@\n";
+    return 0;
+  }
+  return 1;
+}
+
+# List the names of all OBS projects whose name starts with $prefix, using the
+# project search with an attribute prefix match. Returns an arrayref of names
+# or (undef, error).
+sub search_projects {
+  my ($prefix) = @_;
+  my $match = "starts-with(\@name,'$prefix')";
+  $match =~ s/([^A-Za-z0-9_.~-])/sprintf('%%%02X', ord($1))/ge;
+  my @hdrs = defined $api_auth ? ($api_auth) : ();
+  my $body;
+  eval {
+    $body = BSRPC::rpc({ 'uri' => "$source_url/search/project?match=$match",
+    		  	   'request' => 'GET',
+    		  	   'headers' => \@hdrs,
+    		  	   'verbatim_uri' => 1,
+    		  	   'timeout' => 30 }, undef);
+  };
+  return (undef, $@) if $@;
+  my @names;
+  while (($body || '') =~ m{<project\b[^>]*\bname="([^"]*)"}g) {
+    my $name = $1;
+    $name =~ s/&lt;/</g;
+    $name =~ s/&gt;/>/g;
+    $name =~ s/&quot;/"/g;
+    $name =~ s/&#39;/'/g;
+    $name =~ s/&#(\d+);/chr($1)/ge;
+    $name =~ s/&#x([0-9a-fA-F]+);/chr(hex($1))/ge;
+    $name =~ s/&amp;/&/g;
+    # only touch projects which really are ours, whatever the search returns
+    push @names, $name if index($name, $prefix) == 0;
+  }
+  return (\@names, undef);
 }
 
 # Build the project meta xml for $projectname. In the fork case, add upstream
@@ -560,14 +732,7 @@ sub reconcile_package_set {
     # only delete packages which belong to the organisation on our instance
     next unless defined $scmsync && $scmsync =~ m{^(?:\w+://(?:[^@/]+@)?[^/]+|[^@/]+\@[^:/]+)[:/]\Q$org\E/};
     print "reconcile_package_set: deleting package $projectname/$packagename\n";
-    my @hdrs = defined $api_auth ? ($api_auth) : ();
-    eval {
-      BSRPC::rpc({ 'uri' => "$source_url/source/$projectname/$packagename",
-      		  	   'request' => 'DELETE',
-      		  	   'headers' => \@hdrs,
-      		  	   'timeout' => 30 }, undef);
-    };
-    print "reconcile_package_set: failed to delete package $projectname/$packagename: $@\n" if $@;
+    delete_package($projectname, $packagename);
   }
 }
 
@@ -734,9 +899,17 @@ sub repositoryevent {
   die("need event data as content\n") unless BSServer::have_content();
   my $batch_json = BSServer::read_data(10000000);
   my $batch = JSON::XS::decode_json($batch_json);
-
-  die("no ref given\n") unless $batch->{'ref'};
-  die("no repository given\n") unless $batch->{'repository'};
+  die("no event data given\n") unless ref($batch) eq 'HASH';
+  # Gitea names the event type in a header, some payload types do not carry an
+  # event field themselves
+  my $hevent = BSServer::header('x-gitea-event');
+  $batch->{'event'} = $hevent if defined($hevent) && !defined($batch->{'event'});
+  my $kind = BSPreset::gitea_event_kind($batch);
+  # events which do not concern us are acknowledged without being queued
+  if (!defined($kind)) {
+    return (JSON::XS::encode_json({ answer => 'ignored' }), 'Content-Type: application/json');
+  }
+  die("no repository given\n") unless ref($batch->{'repository'}) eq 'HASH';
   die("no clone repository given\n") unless $batch->{'repository'}->{'clone_url'};
 
   # write event to queue file
@@ -744,7 +917,8 @@ sub repositoryevent {
   my $filepath = "$queue_dir/$timestamp.json";
   open(my $fh, '>', $filepath) or die("cannot write queue file $filepath: $!\n");
   binmode($fh);
-  print $fh $batch_json;
+  # store the event with the normalised event type, not the raw content
+  print $fh JSON::XS::encode_json($batch);
   close($fh);
 
   # try to process queue
@@ -753,8 +927,6 @@ sub repositoryevent {
   my $resp = {
     answer => 'thank you',
   };
-  #  print Dumper(JSON::XS::encode_json($resp));
-  # print "Received: $filepath\n";
   return (JSON::XS::encode_json($resp), 'Content-Type: application/json');
 }
 
