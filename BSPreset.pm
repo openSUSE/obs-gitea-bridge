@@ -25,11 +25,23 @@ use BSXML;
 
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml);
+our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix);
 
 # Prefix stripped from repo URLs to derive the OBS path project/repository.
 # Made configurable via config.pm ($BSPreset::gitprefix).
 our $gitprefix = 'https://download.opensuse.org/repositories/';
+
+# Normalize the download url prefix which gets stripped from repository urls
+# to derive the OBS path project/repository. The OBS api reports the
+# download_url without a trailing slash while the repository urls contain one
+# before the project name, so the prefix must always end in exactly one slash
+# or the derived project names keep a leading slash.
+sub normalize_gitprefix {
+  my ($prefix) = @_;
+  return undef unless defined $prefix && length $prefix;
+  $prefix =~ s{/+$}{};
+  return "$prefix/";
+}
 
 # Parse a _manifest yaml string and return the presets list.
 # Returns undef when the manifest is not a hash or does not contain
@@ -264,6 +276,7 @@ sub preset_data {
         next;
       }
       $url =~ s{^\Q$gitprefix\E}{};
+      $url =~ s{^/+}{};
       $url =~ s{/$}{};
       my $slash = rindex($url, '/');
       next unless $slash > 0;

@@ -87,7 +87,7 @@ eval {
                           'headers' => [$header],
                           'timeout' => 30 }, undef);
   my ($download_url) = ($body =~ m{<download_url>\s*([^<]+?)\s*</download_url>});
-  $BSPreset::gitprefix = $download_url if defined $download_url && length $download_url;
+  $BSPreset::gitprefix = BSPreset::normalize_gitprefix($download_url) if defined $download_url && length $download_url;
   print "using download_url $BSPreset::gitprefix\n";
 } unless @ARGV;
 print "failed to read download_url from $obsurl/configuration: $@\n" if $@;
@@ -385,7 +385,10 @@ sub setup_package_set_project {
     return;
   }
   # the batch stays undef: fork handling does not apply to organisation sets
-  create_or_update_project($projectname, $presets, undef, undef, undef);
+  unless (create_or_update_project($projectname, $presets, undef, undef, undef)) {
+    print "setup_project: skipping package reconciliation for $projectname, the project meta was not updated\n";
+    return;
+  }
   my $members = BSGit::org_repo_members($gitea_root, $resolved->{'organisation'}, $resolved->{'branch'});
   $members = BSPreset::select_members($members, $resolved);
   print "setup_project: organisation $resolved->{'organisation'} has " . (0 + @$members) . " package_set members for $projectname\n";
@@ -430,7 +433,7 @@ sub create_or_update_project {
   my $xml = eval { project_xml($projectname, $presets, $batch, $scmsync, $manifest) };
   if ($@) {
     print "create_or_update_project: $@";
-    return;
+    return 0;
   }
   print "create_or_update_project: project xml for $projectname:\n$xml";
 
@@ -443,7 +446,11 @@ sub create_or_update_project {
     		  	   'timeout' => 30,
     		  	   'data' => $xml }, undef);
   };
-  print "create_or_update_project: failed to update $projectname: $@\n" if $@;
+  if ($@) {
+    print "create_or_update_project: failed to update $projectname: $@\n";
+    return 0;
+  }
+  return 1;
 }
 
 # Read the project meta of $projectname from the OBS api.

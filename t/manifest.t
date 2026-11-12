@@ -159,7 +159,20 @@ is($d7->{repository}[0]{path}[0]{project}, 'openSUSE:Factory', 'custom gitprefix
 is($d7->{repository}[0]{path}[0]{repository}, 'standard', 'custom gitprefix derives repository');
 my $d8 = BSPreset::preset_data('p', [{ name => 'r', repo => 'https://download.opensuse.org/repositories/X/other' }]);
 is($d8->{repository}[0]{path}[0]{project}, 'https://download.opensuse.org/repositories/X', 'url outside custom prefix is appended as-is');
+
+# the OBS api reports the download_url without a trailing slash (daemon case)
+$BSPreset::gitprefix = 'https://download.opensuse.org/repositories';
+my $d_ns = BSPreset::preset_data('p', [{ name => 'r', repo => 'https://download.opensuse.org/repositories/openSUSE:Factory/standard' }]);
+is($d_ns->{repository}[0]{path}[0]{project}, 'openSUSE:Factory', 'gitprefix without trailing slash still splits the project');
+is($d_ns->{repository}[0]{path}[0]{repository}, 'standard', 'repository part unaffected by slash-less gitprefix');
 $BSPreset::gitprefix = $saved_prefix;
+
+# --- normalize_gitprefix ---
+is(BSPreset::normalize_gitprefix('https://x.example.org/repositories'), 'https://x.example.org/repositories/', 'trailing slash is added');
+is(BSPreset::normalize_gitprefix('https://x.example.org/repositories/'), 'https://x.example.org/repositories/', 'single trailing slash kept');
+is(BSPreset::normalize_gitprefix('https://x.example.org/repositories///'), 'https://x.example.org/repositories/', 'multiple trailing slashes collapsed');
+is(BSPreset::normalize_gitprefix(''), undef, 'empty prefix -> undef');
+is(BSPreset::normalize_gitprefix(undef), undef, 'undef stays undef');
 
 # --- preset_xml ---
 my $xml = BSPreset::preset_xml('git:Owner:Repo:main', $presets);
