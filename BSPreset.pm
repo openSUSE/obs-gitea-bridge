@@ -25,7 +25,7 @@ use BSXML;
 
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix gitea_event_kind branch_project_name repo_project_prefix git_host scmsync_from_source);
+our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix gitea_event_kind branch_project_name repo_project_prefix sanitize_project_part project_name_in_scope package_name_in_scope git_host scmsync_from_source);
 
 # Prefix stripped from repo URLs to derive the OBS path project/repository.
 # Made configurable via config.pm ($BSPreset::gitprefix).
@@ -370,15 +370,54 @@ sub gitea_event_kind {
   return undef;
 }
 
+# Map one component of a project name (organisation, repository or branch) to
+# characters OBS accepts in project names which also cannot change the
+# resource an api url addresses: ':' would add a project name component, '/'
+# and '#' move the request elsewhere. OBS wants every component to start with
+# a letter, a number or one of '+-', so a leading '.' or '_' becomes '-'.
+# Distinct repositories can map to the same project name after this, the
+# mapping is deterministic for creation, deletion and the project search.
+sub sanitize_project_part {
+  my ($part) = @_;
+  return undef unless defined($part) && length($part);
+  $part =~ s/[^A-Za-z0-9._+-]/_/g;
+  $part =~ s/^[_+.]+/-/;
+  return $part;
+}
+
+# True when $projectname is below the given autosetup prefix and composed
+# only of characters which are safe inside the path part of an api url and
+# which OBS accepts in project names: every ':' separated component starts
+# with a letter, a number or one of '+-' and continues with letters, numbers
+# or one of '._+-'. Names are derived from repository events, so nothing
+# outside this scope may ever be created, read or deleted.
+sub project_name_in_scope {
+  my ($prefix, $projectname) = @_;
+  return 0 unless defined($prefix) && defined($projectname);
+  return 0 unless index($projectname, "$prefix:") == 0;
+  return $projectname =~ m{\A[a-zA-Z0-9+-][A-Za-z0-9._+-]*(?::[a-zA-Z0-9+-][A-Za-z0-9._+-]*)*\z} ? 1 : 0;
+}
+
+# True when $packagename is safe to put into the path of an api url. '.' and
+# '..' would address another directory, they are never package names.
+sub package_name_in_scope {
+  my ($packagename) = @_;
+  return 0 unless defined($packagename) && length($packagename);
+  return 0 if $packagename eq '.' || $packagename eq '..';
+  return $packagename =~ m{\A[A-Za-z0-9._+-]+\z} ? 1 : 0;
+}
+
 # Build the OBS project name of a git branch: $prefix:$org:$repo:$branch,
-# with ':' in the organisation and repository name replaced by '_' like
-# everywhere else in the bridge. Returns undef on missing arguments.
+# with every part sanitised for OBS project names and the api url.
+# Returns undef on missing arguments.
 sub branch_project_name {
   my ($prefix, $org, $repo, $branch) = @_;
   return undef unless defined($prefix) && defined($org) && defined($repo) && defined($branch);
-  (my $org2 = $org) =~ s/:/_/g;
-  (my $repo2 = $repo) =~ s/:/_/g;
-  return "$prefix:$org2:$repo2:$branch";
+  my $s_org = sanitize_project_part($org);
+  my $s_repo = sanitize_project_part($repo);
+  my $s_branch = sanitize_project_part($branch);
+  return undef unless defined($s_org) && defined($s_repo) && defined($s_branch);
+  return "$prefix:$s_org:$s_repo:$s_branch";
 }
 
 # Build the OBS project name prefix covering the branch projects of all
@@ -386,9 +425,10 @@ sub branch_project_name {
 sub repo_project_prefix {
   my ($prefix, $org, $repo) = @_;
   return undef unless defined($prefix) && defined($org) && defined($repo);
-  (my $org2 = $org) =~ s/:/_/g;
-  (my $repo2 = $repo) =~ s/:/_/g;
-  return "$prefix:$org2:$repo2:";
+  my $s_org = sanitize_project_part($org);
+  my $s_repo = sanitize_project_part($repo);
+  return undef unless defined($s_org) && defined($s_repo);
+  return "$prefix:$s_org:$s_repo:";
 }
 
 # Return the scheme://host (or user@host for scp style urls) part of a git

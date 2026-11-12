@@ -375,9 +375,13 @@ sub handle_branch_delete {
   my $projectname = BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch);
   my (undef, $err) = get_project_meta($projectname);
   if ($err) {
-    # a network problem deserves a retry, a missing project is fine
-    return 0 unless $err =~ /^404/;
-    print "branch_delete: project $projectname does not exist in OBS\n";
+    if ($err =~ /^404/) {
+      print "branch_delete: project $projectname does not exist in OBS\n";
+    } else {
+      # anything but a missing project deserves a retry
+      print "branch_delete: cannot read the project meta of $projectname: $err";
+      return 0;
+    }
   } else {
     delete_project($projectname) or $failed = 1;
   }
@@ -508,6 +512,21 @@ sub setup_package_set_project {
   reconcile_package_set($projectname, $resolved, $members, $clone_url);
 }
 
+# True when $projectname is a project this bridge manages: below the
+# configured autosetup prefix and made only of characters which are safe
+# inside the path of an api url and accepted by OBS. Project names are
+# derived from repository events, never act on a name failing this check.
+sub project_in_scope {
+  my ($projectname) = @_;
+  return BSPreset::project_name_in_scope($autosetup_prefix, $projectname);
+}
+
+# True when $packagename is safe to put into the path of an api url.
+sub package_name_in_scope {
+  my ($packagename) = @_;
+  return BSPreset::package_name_in_scope($packagename);
+}
+
 # Delete a project with all its packages from OBS. Deleting the project meta
 # alone would leave the packages behind, a delete on the project source purges
 # the whole project. The delete is forced, OBS otherwise refuses to remove a
@@ -516,6 +535,10 @@ sub setup_package_set_project {
 # error. Logs exactly one line about the outcome.
 sub delete_project {
   my ($projectname) = @_;
+  unless (project_in_scope($projectname)) {
+    print "delete_project: refusing to delete $projectname, not a project below the $autosetup_prefix prefix\n";
+    return 0;
+  }
   my @hdrs = defined $api_auth ? ($api_auth) : ();
   eval {
     BSRPC::rpc({ 'uri' => "$source_url/source/$projectname",
@@ -538,6 +561,10 @@ sub delete_project {
 # Remove a package with all its content from OBS.
 sub delete_package {
   my ($projectname, $packagename) = @_;
+  unless (project_in_scope($projectname) && package_name_in_scope($packagename)) {
+    print "delete_package: refusing to delete $projectname/$packagename, not a project below the $autosetup_prefix prefix or an unsafe name\n";
+    return 0;
+  }
   my @hdrs = defined $api_auth ? ($api_auth) : ();
   eval {
     BSRPC::rpc({ 'uri' => "$source_url/source/$projectname/$packagename",
@@ -608,6 +635,11 @@ sub project_xml {
 sub create_or_update_project {
   my ($projectname, $presets, $batch, $scmsync, $manifest) = @_;
 
+  unless (project_in_scope($projectname)) {
+    print "create_or_update_project: refusing to touch $projectname, not a project below the $autosetup_prefix prefix\n";
+    return 0;
+  }
+
   my $xml = eval { project_xml($projectname, $presets, $batch, $scmsync, $manifest) };
   if ($@) {
     print "create_or_update_project: $@";
@@ -634,6 +666,7 @@ sub create_or_update_project {
 # Read the project meta of $projectname from the OBS api.
 sub get_project_meta {
   my ($projectname) = @_;
+  return (undef, "refused: $projectname is not a project below the $autosetup_prefix prefix\n") unless project_in_scope($projectname);
   my @hdrs = defined $api_auth ? ($api_auth) : ();
   my $meta;
   eval {
@@ -649,6 +682,7 @@ sub get_project_meta {
 # Read the package meta of $packagename in $projectname from the OBS api.
 sub get_package_meta {
   my ($projectname, $packagename) = @_;
+  return (undef, "refused: $projectname/$packagename is not a project below the $autosetup_prefix prefix\n") unless project_in_scope($projectname) && package_name_in_scope($packagename);
   my @hdrs = defined $api_auth ? ($api_auth) : ();
   my $meta;
   eval {
@@ -665,6 +699,7 @@ sub get_package_meta {
 # starting with an underscore are not packages and get left out.
 sub get_project_packages {
   my ($projectname) = @_;
+  return (undef, "refused: $projectname is not a project below the $autosetup_prefix prefix\n") unless project_in_scope($projectname);
   my @hdrs = defined $api_auth ? ($api_auth) : ();
   my $dir;
   eval {
@@ -762,9 +797,7 @@ sub parent_project_paths {
   # branch is used unless the synthetic --parent batch specifies one.
   my $parent_branch = parent_branch_of($batch);
   $parent_branch = $branch unless defined $parent_branch;
-  $p_org =~ s/:/_/g;
-  $p_repo =~ s/:/_/g;
-  my $parent_project = "$autosetup_prefix:$p_org:$p_repo:$parent_branch";
+  my $parent_project = BSPreset::branch_project_name($autosetup_prefix, $p_org, $p_repo, $parent_branch);
   my ($pmeta, $err) = get_project_meta($parent_project);
   if ($err) {
     print "parent_project_paths: upstream project $parent_project not found, building $projectname without extra paths: $err";
@@ -853,9 +886,7 @@ sub resolve_project_spec {
 
   my ($org, $repo) = split('/', $fullname, 2);
   die("cannot determine org/repo from $fullname\n") unless defined $org && defined $repo;
-  $org =~ s/:/_/g;
-  $repo =~ s/:/_/g;
-  return ("$autosetup_prefix:$org:$repo:$branch", $manifest, "$giturl#$branch", $batch);
+  return (BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch), $manifest, "$giturl#$branch", $batch);
 }
 
 # Set up a single project for a given git branch, given as "GIT_URL#BRANCH".

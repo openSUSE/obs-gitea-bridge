@@ -59,12 +59,54 @@ is(BSPreset::gitea_event_kind('nonsense'), undef, 'scalar payload');
 # --- project names ---
 is(BSPreset::branch_project_name('git', 'adrianSuSE', 'test', 'factory'), 'git:adrianSuSE:test:factory', 'branch project name');
 is(BSPreset::branch_project_name('git', 'or:g', 're:po', 'b'), 'git:or_g:re_po:b', 'colons in org and repo are replaced');
-is(BSPreset::branch_project_name('git', 'org', 'repo', 'feature/x'), 'git:org:repo:feature/x', 'branch name is kept as is');
+is(BSPreset::branch_project_name('git', 'org', 'repo', 'feature/x'), 'git:org:repo:feature_x', 'slashes in branch names are replaced');
 is(BSPreset::branch_project_name('git', 'org', 'repo'), undef, 'missing branch');
 is(BSPreset::branch_project_name(undef, 'org', 'repo', 'b'), undef, 'missing prefix');
 is(BSPreset::repo_project_prefix('git', 'adrianSuSE', 'test'), 'git:adrianSuSE:test:', 'repo project prefix');
 is(BSPreset::repo_project_prefix('git', 'or:g', 're:po'), 'git:or_g:re_po:', 'repo project prefix sanitises colons');
 is(BSPreset::repo_project_prefix('git', 'org'), undef, 'missing repo');
+
+# --- sanitize_project_part ---
+is(BSPreset::sanitize_project_part('factory'), 'factory', 'safe name unchanged');
+is(BSPreset::sanitize_project_part('feature/x'), 'feature_x', 'slash replaced');
+is(BSPreset::sanitize_project_part('PR_imb#4'), 'PR_imb_4', 'hash replaced');
+is(BSPreset::sanitize_project_part('a b'), 'a_b', 'space replaced');
+is(BSPreset::sanitize_project_part('or:g'), 'or_g', 'colon replaced');
+is(BSPreset::sanitize_project_part('_ObsPrj'), '-ObsPrj', 'leading underscore becomes a dash');
+is(BSPreset::sanitize_project_part('.hidden'), '-hidden', 'leading dot becomes a dash');
+is(BSPreset::sanitize_project_part('~x='), '-x_', 'unsafe leading character becomes a dash');
+is(BSPreset::sanitize_project_part('a..b'), 'a..b', 'dots inside are kept');
+is(BSPreset::sanitize_project_part('x~y=z,w'), 'x_y_z_w', 'multiple unsafe characters');
+is(BSPreset::sanitize_project_part(''), undef, 'empty part');
+is(BSPreset::sanitize_project_part(undef), undef, 'undef part');
+is(BSPreset::branch_project_name('git', 'HPC', '_ObsPrj', 'PR_imb#4'), 'git:HPC:-ObsPrj:PR_imb_4', 'hpc style names sanitised');
+is(BSPreset::branch_project_name('git', 'org', 'repo', 'a/../../home:evil'), 'git:org:repo:a_.._.._home_evil', 'path traversal stays inside one component');
+is(BSPreset::repo_project_prefix('git', 'HPC', '_ObsPrj'), 'git:HPC:-ObsPrj:', 'repo prefix sanitised like the project name');
+
+# --- project and package name scope ---
+ok(BSPreset::project_name_in_scope('git', 'git:org:repo:branch'), 'project below the prefix is in scope');
+ok(BSPreset::project_name_in_scope('git', 'git:org:repo:branch_1.x-y+z'), 'safe special characters are in scope');
+ok(!BSPreset::project_name_in_scope('git', 'home:user:project'), 'project outside the prefix is refused');
+ok(!BSPreset::project_name_in_scope('git', 'git'), 'the bare prefix is no project');
+ok(!BSPreset::project_name_in_scope('git', 'git:org:repo:feature/x'), 'slash never addresses another resource');
+ok(!BSPreset::project_name_in_scope('git', 'git:org:repo:a/../../home:evil'), 'traversal is refused');
+ok(!BSPreset::project_name_in_scope('git', 'git:org:repo:PR_imb#4'), 'hash is refused');
+ok(!BSPreset::project_name_in_scope('git', 'git:org:repo:x?y'), 'query characters are refused');
+ok(!BSPreset::project_name_in_scope('git', 'git:org:repo:x y'), 'spaces are refused');
+ok(BSPreset::project_name_in_scope('git', 'git:org..repo:x'), 'dots inside a component are accepted, OBS accepts them too');
+ok(!BSPreset::project_name_in_scope('git', 'git:org:.repo:x'), 'a component starting with a dot is refused');
+ok(!BSPreset::project_name_in_scope('git', 'git::repo:x'), 'empty components are refused');
+ok(!BSPreset::project_name_in_scope('git', 'gitprefix:org:x'), 'prefix must be followed by a separator');
+ok(!BSPreset::project_name_in_scope('git', undef), 'undef is refused');
+ok(!BSPreset::project_name_in_scope(undef, 'git:org:x'), 'undef prefix refuses everything');
+is(BSPreset::branch_project_name('git', 'org', 'repo', 'PR_imb#4'), 'git:org:repo:PR_imb_4', 'sanitised branch names are in scope again');
+ok(BSPreset::project_name_in_scope('git', BSPreset::repo_project_prefix('git', 'org', 'repo') . 'branch'), 'repo prefix and project name agree');
+ok(BSPreset::package_name_in_scope('my_package-1.2+rpm'), 'safe package name');
+ok(!BSPreset::package_name_in_scope('.'), 'a dot is no package');
+ok(!BSPreset::package_name_in_scope('..'), 'dot dot is no package');
+ok(!BSPreset::package_name_in_scope('a/b'), 'package names never carry a path');
+ok(!BSPreset::package_name_in_scope('a#b'), 'package names never carry a fragment');
+ok(!BSPreset::package_name_in_scope(undef), 'undef package name');
 
 # --- git host extraction ---
 is(BSPreset::git_host('https://src.opensuse.org/adrianSuSE/test.git'), 'https://src.opensuse.org', 'https clone url');
