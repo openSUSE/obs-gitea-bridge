@@ -935,11 +935,13 @@ sub show_single_project {
 sub repositoryevent {
   die("need event data as content\n") unless BSServer::have_content();
   my $batch_json = BSServer::read_data(10000000);
-  my $batch = JSON::XS::decode_json($batch_json);
-  die("no event data given\n") unless ref($batch) eq 'HASH';
   # Gitea names the event type in a header, some payload types do not carry an
   # event field themselves
   my $hevent = BSServer::header('x-gitea-event');
+  my $batch = eval { JSON::XS::decode_json($batch_json) };
+  # log every incoming event before anything else may abort the handling
+  print BSPreset::event_logline($batch, $hevent);
+  die("no event data given\n") unless ref($batch) eq 'HASH';
   $batch->{'event'} = $hevent if defined($hevent) && !defined($batch->{'event'});
   my $kind = BSPreset::gitea_event_kind($batch);
   # events which do not concern us are acknowledged without being queued

@@ -25,7 +25,7 @@ use BSXML;
 
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix gitea_event_kind branch_project_name repo_project_prefix sanitize_project_part project_name_in_scope package_name_in_scope git_host scmsync_from_source);
+our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix gitea_event_kind event_logline branch_project_name repo_project_prefix sanitize_project_part project_name_in_scope package_name_in_scope git_host scmsync_from_source);
 
 # Prefix stripped from repo URLs to derive the OBS path project/repository.
 # Made configurable via config.pm ($BSPreset::gitprefix).
@@ -368,6 +368,45 @@ sub gitea_event_kind {
     return 'push' if defined($batch->{'ref'}) && ref($repository) eq 'HASH' && defined($repository->{'clone_url'});
   }
   return undef;
+}
+
+# One log line for every incoming webhook request, printed before anything
+# else may abort the handling, so that the journal always shows which events
+# arrived. The line names the classified event kind, the repository and the
+# branch or tag when the payload carries one. Events which are not queued are
+# labelled ignored, matching the answer the caller gives for them. $hevent is
+# the raw x-gitea-event header, used when the payload itself names no event.
+sub event_logline {
+  my ($batch, $hevent) = @_;
+  if (ref($batch) ne 'HASH') {
+    return "Event: cannot parse the payload of the x-gitea-event '$hevent' request\n"
+      if defined($hevent) && length($hevent);
+    return "Event: cannot parse the event payload\n";
+  }
+  my $kind = gitea_event_kind($batch);
+  my $what;
+  if (defined($kind)) {
+    $what = $kind;
+  } elsif (defined($batch->{'event'}) && length($batch->{'event'})) {
+    $what = 'ignored ' . $batch->{'event'};
+  } elsif (defined($hevent) && length($hevent)) {
+    $what = 'ignored ' . $hevent;
+  } else {
+    $what = 'unknown event';
+  }
+  my $repository = $batch->{'repository'};
+  my $fullname = ref($repository) eq 'HASH' ? $repository->{'full_name'} : undef;
+  my $line = 'Event: ' . $what . ' for '
+    . (defined($fullname) && length($fullname) ? $fullname : 'unknown repository');
+  if (defined($batch->{'ref'}) && length($batch->{'ref'})) {
+    # show branch and tag names as the handlers see them
+    my $ref = $batch->{'ref'};
+    $ref =~ s{^refs/heads/}{};
+    $ref =~ s{^refs/tags/}{};
+    $ref =~ s{^refs/}{};
+    $line .= '#' . $ref;
+  }
+  return $line . "\n";
 }
 
 # Map one component of a project name (organisation, repository or branch) to

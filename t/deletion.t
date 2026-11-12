@@ -130,4 +130,27 @@ is(BSPreset::scmsync_from_source(undef, $host, 'org', 'repo', 'factory'), 0, 'no
 is(BSPreset::scmsync_from_source('http://localhost:3000/org/repo.git#anybranch', $host, 'org', 'repo', undef), 1, 'any branch matches');
 is(BSPreset::scmsync_from_source('http://localhost:3000/org/repo.git', $host, 'org', 'repo', undef), 0, 'url without branch is no source');
 
+# --- incoming event log lines ---
+is(BSPreset::event_logline({ ref => 'refs/heads/slfo-main', repository => $repo }),
+   "Event: push for org/repo#slfo-main\n", 'push event line');
+is(BSPreset::event_logline({ event => 'delete', ref_type => 'branch', ref => 'PR_imb#4', repository => $repo }),
+   "Event: branch_delete for org/repo#PR_imb#4\n", 'branch delete line');
+is(BSPreset::event_logline({ event => 'repository', action => 'deleted', repository => $repo }),
+   "Event: repo_delete for org/repo\n", 'repository delete line');
+is(BSPreset::event_logline({ event => 'delete', ref_type => 'tag', ref => 'v1.0', repository => $repo }),
+   "Event: tag_delete for org/repo#v1.0\n", 'tag delete line');
+is(BSPreset::event_logline({ event => 'ping', repository => $repo }),
+   "Event: ignored ping for org/repo\n", 'ignored event line');
+is(BSPreset::event_logline({ repository => $repo }, 'ping'),
+   "Event: ignored ping for org/repo\n", 'ignored event named only by the header');
+is(BSPreset::event_logline({}, undef),
+   "Event: unknown event for unknown repository\n", 'event without any name');
+is(BSPreset::event_logline({ ref => 'refs/heads/x', repository => { clone_url => 'u' } }),
+   "Event: push for unknown repository#x\n", 'repository without full name');
+is(BSPreset::event_logline(undef, 'push'),
+   "Event: cannot parse the payload of the x-gitea-event 'push' request\n", 'unparsable payload with header');
+is(BSPreset::event_logline(undef), "Event: cannot parse the event payload\n", 'unparsable payload without header');
+is(BSPreset::event_logline('not a hash', 'push'),
+   "Event: cannot parse the payload of the x-gitea-event 'push' request\n", 'json scalar payload');
+
 done_testing();
