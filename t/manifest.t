@@ -227,4 +227,83 @@ like($fs, qr/<scmsync>https:\/\/gitea\.example\.com\/owner\/repo\.git#main<\/scm
 my $fsd = BSPreset::preset_data('p', [{ name => 'r' }], undef, 'x#y');
 is($fsd->{scmsync}, 'x#y', 'scmsync stored in data');
 
+# --- manifest_package_set ---
+my $mset = <<'YAML';
+presets:
+  - name: openSUSE_Factory
+    repo:
+      - https://download.opensuse.org/repositories/openSUSE:Factory/standard
+package_set:
+  organisation: my-org
+  branch: factory
+  exclude:
+    - old-stuff
+YAML
+my $set = BSPreset::manifest_package_set($mset);
+is(ref($set), 'HASH', 'package_set parsed as a hashref');
+is($set->{'organisation'}, 'my-org', 'organisation parsed');
+is($set->{'branch'}, 'factory', 'branch parsed');
+is_deeply($set->{'exclude'}, ['old-stuff'], 'exclude list parsed');
+
+is(BSPreset::manifest_package_set($manifest), undef, 'manifest without package_set -> undef');
+eval { BSPreset::manifest_package_set("package_set:\n  organisation: o\n") };
+like($@, qr/needs a branch/, 'package_set without branch dies');
+eval { BSPreset::manifest_package_set("package_set:\n  - a\n") };
+like($@, qr/invalid package_set/, 'package_set that is a list dies');
+eval { BSPreset::manifest_package_set("key: [unclosed") };
+like($@, qr/cannot parse _manifest/, 'invalid yaml dies in package_set parse');
+
+# --- giturl_host_owner ---
+is_deeply([BSPreset::giturl_host_owner('https://git.example.com/MyOrg/my-repo.git')], ['git.example.com', 'MyOrg'], 'https url split');
+is_deeply([BSPreset::giturl_host_owner('http://git.example.com/org/repo')], ['git.example.com', 'org'], 'http url without .git split');
+is_deeply([BSPreset::giturl_host_owner('git@git.example.com:Org/repo.git')], ['git.example.com', 'Org'], 'scp style url split');
+is_deeply([BSPreset::giturl_host_owner('ssh://git@git.example.com/org/repo.git')], ['git.example.com', 'org'], 'ssh url with user split');
+is(BSPreset::giturl_host_owner('nonsense'), undef, 'unparsable url -> undef');
+is(BSPreset::giturl_host_owner(undef), undef, 'undef url -> undef');
+
+# --- resolve_package_set ---
+my $rs = BSPreset::resolve_package_set({ 'branch' => 'factory' }, 'https://git.example.com/MyOrg/main-repo.git');
+is($rs->{'server'}, 'git.example.com', 'server defaults to the repository host');
+is($rs->{'organisation'}, 'MyOrg', 'organisation defaults to the repository owner');
+is($rs->{'branch'}, 'factory', 'branch kept');
+is_deeply($rs->{'exclude'}, {}, 'no exclude list by default');
+
+my $rs2 = BSPreset::resolve_package_set({ 'organisation' => 'other-org', 'branch' => 'stable' }, 'git@git.example.com:MyOrg/main-repo.git');
+is($rs2->{'organisation'}, 'other-org', 'explicit organisation overrides the owner default');
+
+my $rs3 = BSPreset::resolve_package_set({ 'server' => 'https://git.example.com', 'branch' => 'x', 'exclude' => ['a', 'b'] }, 'https://git.example.com/o/r.git');
+is_deeply($rs3->{'exclude'}, { 'a' => 1, 'b' => 1 }, 'exclude list becomes a lookup hash');
+
+eval { BSPreset::resolve_package_set({ 'server' => 'https://git.other.org', 'branch' => 'x' }, 'https://git.example.com/o/r.git') };
+like($@, qr/remote package_set server/, 'a foreign server dies as unsupported');
+
+eval { BSPreset::resolve_package_set({ 'branch' => 'x' }, 'nonsense') };
+like($@, qr/cannot determine gitea host/, 'unparsable clone url dies');
+
+# --- select_members ---
+my @members_in = ( { name => 'b-repo', branch => 'factory' }, { name => 'a-repo', branch => 'factory' }, { name => 'old-stuff', branch => 'factory' } );
+my $selected = BSPreset::select_members(\@members_in, { 'exclude' => { 'old-stuff' => 1 } });
+is_deeply([ map { $_->{'name'} } @$selected ], ['a-repo', 'b-repo'], 'members excluded and sorted');
+my $all = BSPreset::select_members(\@members_in, undef);
+is_deeply([ map { $_->{'name'} } @$all ], ['a-repo', 'b-repo', 'old-stuff'], 'no exclude keeps all, sorted by name');
+
+# --- sanitize_package_name ---
+is(BSPreset::sanitize_package_name('hello-world_2.3'), 'hello-world_2.3', 'valid name passes through');
+is(BSPreset::sanitize_package_name('foo:bar'), 'foo_bar', 'colon replaced');
+is(BSPreset::sanitize_package_name('a b/c'), 'a_b_c', 'space and slash replaced');
+
+# --- scmsync_url_for ---
+is(BSPreset::scmsync_url_for('https://git.example.com/o/r.git', 'my-org', 'some-repo', 'factory'),
+   'https://git.example.com/my-org/some-repo.git#factory', 'http style member url');
+is(BSPreset::scmsync_url_for('git@git.example.com:o/r.git', 'my-org', 'some-repo', 'factory'),
+   'git@git.example.com:my-org/some-repo.git#factory', 'scp style member url');
+is(BSPreset::scmsync_url_for('http://git.example.com/gitea/o/r.git', 'org', 'r', 'b'),
+   'http://git.example.com/org/r.git#b', 'member url uses the host root (sub-path hosting not supported)');
+is(BSPreset::scmsync_url_for(undef, 'org', 'r', 'b'), undef, 'undef clone url -> undef');
+
+# --- package_meta_xml ---
+my $pxml = BSPreset::package_meta_xml('git:org:root:main', 'some-repo', 'https://git.example.com/org/some-repo.git#main');
+like($pxml, qr/<package name="some-repo" project="git:org:root:main">/, 'package meta has name and project attributes');
+like($pxml, qr/<scmsync>https:\/\/git\.example\.com\/org\/some-repo\.git#main<\/scmsync>/, 'package meta contains scmsync element');
+
 done_testing();

@@ -25,7 +25,7 @@ use BSXML;
 
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw(manifest_presets preset_data preset_xml);
+our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml);
 
 # Prefix stripped from repo URLs to derive the OBS path project/repository.
 # Made configurable via config.pm ($BSPreset::gitprefix).
@@ -52,6 +52,119 @@ sub manifest_subdirectories {
   return undef unless ref($data) eq 'HASH';
   return $data->{'subdirectories'} if ref($data->{'subdirectories'}) eq 'ARRAY';
   return undef;
+}
+
+# Return the package_set section from a _manifest string as a hashref, or
+# undef when the manifest does not define one. The section declares all
+# repositories of a Gitea organisation with a given branch as build packages.
+# Dies when the section has an invalid shape or names no branch.
+sub manifest_package_set {
+  my ($manifest) = @_;
+  my $data = eval { YAML::XS::Load($manifest) };
+  die("cannot parse _manifest: $@\n") if $@;
+  return undef unless ref($data) eq 'HASH';
+  my $set = $data->{'package_set'};
+  return undef unless defined $set;
+  die("invalid package_set section in _manifest\n") unless ref($set) eq 'HASH';
+  die("package_set section in _manifest needs a branch\n") unless defined $set->{'branch'} && !ref($set->{'branch'}) && length $set->{'branch'};
+  return $set;
+}
+
+# Split a git url into its host and owner parts. The host is returned without
+# a scheme or user, the owner is the first path element below the host.
+# Returns undef when the url cannot be parsed.
+sub giturl_host_owner {
+  my ($url) = @_;
+  return undef unless defined $url;
+  my ($host, $path);
+  if ($url =~ m{^(?:https?|ssh|git)://[^@/]+@([^/]+)/(.+)$}) {
+    ($host, $path) = ($1, $2);
+  } elsif ($url =~ m{^(?:https?|ssh|git)://([^/]+)/(.+)$}) {
+    ($host, $path) = ($1, $2);
+  } elsif ($url =~ m{^[^@/]+\@([^:]+):(.+)$}) {
+    ($host, $path) = ($1, $2);
+  } else {
+    return undef;
+  }
+  $path =~ s{/+$}{};
+  $path =~ s/\.git$//;
+  my ($owner) = split('/', $path, 2);
+  return undef unless defined $host && length $host && defined $owner && length $owner;
+  return ($host, $owner);
+}
+
+# Resolve the defaults of a package_set from a _manifest against the git url
+# of the repository carrying the manifest: an unset server and organisation
+# default to the Gitea host and owner of that repository, so an empty section
+# refers to the Gitea server and organisation the local repository is hosted
+# on. Only the local Gitea instance is supported, so a server different from
+# the repository host is an error. Returns the resolved set as a hashref with
+# server, organisation, branch and exclude (a name -> 1 hashref).
+sub resolve_package_set {
+  my ($set, $clone_url) = @_;
+  return undef unless ref($set) eq 'HASH';
+  my ($host, $owner) = giturl_host_owner($clone_url);
+  die("cannot determine gitea host and organisation from '$clone_url'\n") unless defined $host;
+  my $server = $set->{'server'};
+  if (defined $server && length $server) {
+    die("invalid server '$server' in package_set\n") if ref($server);
+    my ($serverhost) = ($server =~ m{^(?:\w+://)?(?:[^@/]+@)?([^/:]+)});
+    die("invalid server '$server' in package_set\n") unless defined $serverhost && length $serverhost;
+    die("remote package_set server '$server' not supported, this instance serves '$host'\n") if $serverhost ne $host;
+  }
+  my $organisation = $set->{'organisation'};
+  die("invalid organisation in package_set\n") if defined $organisation && ref($organisation);
+  $organisation = $owner unless defined $organisation && length $organisation;
+  my %exclude;
+  if (defined $set->{'exclude'}) {
+    die("invalid exclude list in package_set\n") unless ref($set->{'exclude'}) eq 'ARRAY';
+    $exclude{$_} = 1 for grep { defined $_ && !ref $_ && length $_ } @{$set->{'exclude'}};
+  }
+  return { 'server' => $host, 'organisation' => $organisation, 'branch' => $set->{'branch'}, 'exclude' => \%exclude };
+}
+
+# Filter the candidate members (arrayref of {name, branch} hashrefs as
+# returned by BSGit::org_repo_members) through the exclude list of a resolved
+# package_set. Returns a sorted arrayref.
+sub select_members {
+  my ($members, $resolved) = @_;
+  return [] unless ref($members) eq 'ARRAY';
+  my $exclude = ref($resolved) eq 'HASH' ? $resolved->{'exclude'} : undef;
+  $exclude = {} unless ref($exclude) eq 'HASH';
+  return [ sort { $a->{'name'} cmp $b->{'name'} } grep { ref($_) eq 'HASH' && defined $_->{'name'} && length $_->{'name'} && !$exclude->{$_->{'name'}} } @$members ];
+}
+
+# Turn a git repository name into a valid OBS package name.
+sub sanitize_package_name {
+  my ($name) = @_;
+  return undef unless defined $name;
+  $name =~ s/[^+._a-zA-Z0-9-]/_/g;
+  return $name;
+}
+
+# Build the "GIT_URL#BRANCH" scmsync url of a package_set member repository
+# on the same Gitea instance as the given reference clone url. The url is
+# rebuilt from the scheme, user and host of the reference url, so a Gitea
+# hosted below a sub-path is not preserved. Supports both scheme style and scp
+# style urls.
+sub scmsync_url_for {
+  my ($clone_url, $org, $repo, $branch) = @_;
+  return undef unless defined $org && length $org && defined $repo && length $repo && defined $branch && length $branch;
+  return undef unless defined $clone_url;
+  if ($clone_url =~ m{^((?:https?|ssh|git)://(?:[^@/]+@)?[^/]+)/}) {
+    return "$1/$org/$repo.git#$branch";
+  }
+  if ($clone_url =~ m{^([^@/]+\@[^:/]+):}) {
+    return "$1:$org/$repo.git#$branch";
+  }
+  return undef;
+}
+
+# Serialize the OBS package meta xml for a git backed package with its own
+# package level scmsync url.
+sub package_meta_xml {
+  my ($projectname, $packagename, $scmsync) = @_;
+  return XMLout($BSXML::pack, { 'name' => $packagename, 'project' => $projectname, 'scmsync' => $scmsync });
 }
 
 # Compute the list of package source directories. $subdirectories is the
