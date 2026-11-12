@@ -84,4 +84,21 @@ is_deeply([ map { $_->{'name'} } @$selected ], ['repo-a'], 'exclude list filters
 is(BSPreset::scmsync_url_for('https://gitea.example.com/TestOrg/repo-a.git', $resolved->{'organisation'}, 'repo-a', 'factory'),
    'https://gitea.example.com/TestOrg/repo-a.git#factory', 'member scmsync url');
 
+# --- dir_access_error / repo_access_error ---
+is(BSGit::dir_access_error($root), undef, 'readable directory -> no access error');
+is(BSGit::dir_access_error("$root/does-not-exist"), undef, 'missing directory -> no access error');
+is(BSGit::repo_access_error("$root/gitea-repositories/testorg/repo-a.git"), undef, 'readable repository -> no access error');
+is(BSGit::repo_access_error("$root/does-not-exist.git"), undef, 'missing repository -> no access error');
+
+SKIP: {
+  skip 'root bypasses file permissions', 3 if $> == 0;
+  my $glock = "$root/gitea-repositories/locked-org";
+  mkdir $glock or die("cannot mkdir: $!\n");
+  chmod 000, $glock;
+  like(BSGit::dir_access_error($glock), qr/Permission denied/, 'unreadable organisation directory reported');
+  like(BSGit::repo_access_error("$glock/x.git"), qr/Permission denied/, 'repository below unreadable directory reported');
+  chmod 0755, $glock;
+  is(BSGit::dir_access_error($glock), undef, 'readable again -> no access error');
+}
+
 done_testing();

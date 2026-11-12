@@ -26,9 +26,11 @@ package BSGit;
 
 use strict;
 
+use Errno qw(EACCES ENOENT ENOTDIR);
+
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw(git_show git_capture git_get_default_branch git_ref_exists git_lstree_sources org_repo_names org_repo_members);
+our @EXPORT = qw(git_show git_capture git_get_default_branch git_ref_exists git_lstree_sources org_repo_names org_repo_members dir_access_error repo_access_error);
 
 # Read the given file from the given branch of a git repository. Returns
 # undef when the repository or the file does not exist (git's error output
@@ -104,6 +106,42 @@ sub git_lstree_sources {
     }
   }
   return \@sources;
+}
+
+# Report a permission problem on a directory path: returns an error string
+# when the directory cannot be opened by us, undef when it opens fine or
+# simply does not exist. Missing or blocked parent directories show up here
+# as an EACCES on the open, so callers can distinguish "not there" (normal,
+# e.g. a repository without a _manifest) from "not readable for the bridge
+# user" (a setup problem worth logging). Gitea creates its repository store
+# as user gitea with mode 0700, see the permissions section in the README.
+sub dir_access_error {
+  my ($dir) = @_;
+  return undef unless defined $dir && length $dir;
+  if (opendir(my $dh, $dir)) {
+    closedir($dh);
+    return undef;
+  }
+  return undef if $! == ENOENT || $! == ENOTDIR;
+  return "$dir: $!\n";
+}
+
+# Report a read problem on a bare git repository: like dir_access_error, but
+# also checks that the HEAD file can actually be read, since git needs
+# directory traversal and file read access, not just directory listing.
+sub repo_access_error {
+  my ($gitdir) = @_;
+  return undef unless defined $gitdir && length $gitdir;
+  my $err = dir_access_error($gitdir);
+  return $err if defined $err;
+  return undef unless -d $gitdir;
+  # reading the repository needs traversal plus read access on the objects
+  if (!open(my $fh, '<', "$gitdir/HEAD")) {
+    return "$gitdir/HEAD: $!\n" unless $! == ENOENT;
+  } else {
+    close($fh);
+  }
+  return undef;
 }
 
 # List the names of the git repositories a Gitea organisation owns, i.e. the

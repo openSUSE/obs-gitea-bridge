@@ -234,10 +234,20 @@ sub process_org_package_sets {
   return unless defined $clone_url && length $clone_url;
   my $org = $1;
   my $orgdir = "$gitea_root/gitea-repositories/" . lc($org);
-  return unless -d $orgdir;
-  for my $name (@{ BSGit::org_repo_names($gitea_root, $org) }) {
-    my $manifest = git_show("$orgdir/$name.git", $branch, '_manifest');
-    next unless defined $manifest;
+  my $names = BSGit::org_repo_names($gitea_root, $org);
+  if (!@$names) {
+    my $aerr = BSGit::dir_access_error($orgdir);
+    print "org package_set: $aerr" if $aerr;
+    return;
+  }
+  for my $name (@$names) {
+    my $gitdir = "$orgdir/$name.git";
+    my $manifest = git_show($gitdir, $branch, '_manifest');
+    if (!defined $manifest) {
+      my $aerr = BSGit::repo_access_error($gitdir);
+      print "org package_set: $aerr" if $aerr;
+      next;
+    }
     my $set = eval { BSPreset::manifest_package_set($manifest) };
     next if $@ || ref($set) ne 'HASH';
     my $manifest_clone = clone_url_for_repo($clone_url, $org, $name);
@@ -279,6 +289,10 @@ sub process_queue {
     if ($fullname && defined $autosetup_prefix) {
       my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
       my $manifest = git_show($gitdir, $branch, '_manifest');
+      if (!defined $manifest) {
+        my $aerr = BSGit::repo_access_error($gitdir);
+        print "Queue: $aerr" if $aerr;
+      }
       if (defined $manifest) {
         $own_set = eval { BSPreset::manifest_package_set($manifest) };
         print "Queue: invalid package_set in $fullname#$branch: $@\n" if $@;
@@ -360,6 +374,14 @@ sub setup_package_set_project {
   my $resolved = eval { BSPreset::resolve_package_set($set, $clone_url) };
   if ($@) {
     print "setup_project: $@";
+    return;
+  }
+  # an organisation store we cannot read would look like an empty
+  # organisation and wipe the package list, keep it untouched instead
+  my $orgdir = "$gitea_root/gitea-repositories/" . lc($resolved->{'organisation'});
+  my $aerr = BSGit::dir_access_error($orgdir);
+  if ($aerr) {
+    print "setup_project: $aerr, keeping packages of $projectname untouched\n";
     return;
   }
   # the batch stays undef: fork handling does not apply to organisation sets
@@ -614,7 +636,15 @@ sub resolve_project_spec {
 
   my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
   my $manifest = git_show($gitdir, $branch, '_manifest');
-  die("cannot read _manifest from $giturl#$branch\n") unless defined $manifest;
+  unless (defined $manifest) {
+    my $msg = "cannot read _manifest from $giturl#$branch (git dir $gitdir";
+    my $aerr = BSGit::repo_access_error($gitdir);
+    if ($aerr) {
+      $aerr =~ s/\n$//;
+      $msg .= ": $aerr";
+    }
+    die("$msg)\n");
+  }
 
   my $batch;
   if (defined $parent) {

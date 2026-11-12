@@ -17,6 +17,36 @@ Setup
 
       scm_bridge_cookie: YOUR_STRING
 
+Permissions
+===========
+
+The bridge reads the bare git repositories of the Gitea instance below
+$gitea_root directly (for the _manifest lookups and the organisation
+package_set enumeration). The service runs as user obs-gitea-bridge while
+Gitea creates its repository store as user gitea with mode 0700, so read
+access has to be granted explicitly. The recommended way are POSIX ACLs
+on the repositories directory; the default ACL (-d) keeps repositories and
+organisations created in the future accessible as well:
+
+    REPOS=/var/lib/gitea/data/gitea-repositories   # your $gitea_root/gitea-repositories
+    setfacl -R  -m u:obs-gitea-bridge:rX $REPOS
+    setfacl -R -d -m u:obs-gitea-bridge:rX $REPOS
+    # traverse permission on the parent directories, if not world-executable
+    setfacl    -m u:obs-gitea-bridge:x $(dirname "$REPOS")
+
+Gitea has no configuration option to create the repository store group
+readable, so chmod alone would break again on the next created repository.
+
+Without this access the _manifest files cannot be read: events are only
+forwarded as triggerscmsync and no build projects are set up. The log then
+shows "Permission denied" messages for the affected paths, and
+
+    sudo -u obs-gitea-bridge git --git-dir=$REPOS/<org>/<repo>.git show <branch>:_manifest
+
+reproduces the problem. Alternatively the service can run as the gitea
+user (systemd drop-in with User=gitea, plus a chown of the queue
+directory), trading away the privilege separation.
+
 
 _manifest
 =========
