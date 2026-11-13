@@ -324,10 +324,12 @@ sub process_queue {
         $ok = handle_branch_delete($fullname, $clone_url, gitref_to_branch($batch->{'ref'}));
       } elsif ($kind eq 'repo_delete') {
         $ok = handle_repo_delete($fullname, $clone_url);
+      } elsif ($kind eq 'repo_rename') {
+        $ok = handle_repo_rename($batch, $fullname, $clone_url);
       } elsif ($kind eq 'push') {
         $ok = handle_push($batch, $fullname, $clone_url);
       } else {
-        # tag deletions and other repository events do not affect our projects
+        # tag deletions and the remaining repository events do not affect our projects
         print "Queue: ignoring $kind event in $file\n";
       }
       unless ($ok) {
@@ -449,6 +451,84 @@ sub handle_repo_delete {
   }
   delete_project($_) or $failed = 1 for @$projects;
   purge_org_packages($org, $repo, undef, $clone_url) or $failed = 1;
+  return !$failed;
+}
+
+# Set up the OBS project of one branch of $fullname from its _manifest the
+# same way a push event would and trigger its scmsync update. Used for the
+# branches of a renamed repository, where no push event arrives.
+sub setup_branch_project {
+  my ($fullname, $clone_url, $branch) = @_;
+  my ($org, $repo) = split('/', $fullname, 2);
+  return 1 unless defined $org && defined $repo;
+  my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
+  my $manifest = git_show($gitdir, $branch, '_manifest');
+  print "rename: no _manifest in $fullname#$branch, no project to create\n" unless defined $manifest;
+  return 1 unless defined $manifest;
+  my $scmsync = "$clone_url#$branch";
+  eval {
+    setup_project($manifest, BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch), { 'ref' => "refs/heads/$branch", 'repository' => { 'full_name' => $fullname } }, $scmsync, git_show($gitdir, $branch, '_config'));
+  };
+  if ($@) {
+    print "rename: failed to set up $fullname#$branch: $@\n";
+    return 0;
+  }
+  eval {
+    BSRPC::rpc({ 'uri' => "$obsurl/source",
+    	  	   'request' => 'POST',
+    	  	   'headers' => [$header],
+    	  	   'timeout' => 30 }, undef,
+      BSRPC::args({'cmd' => 'triggerscmsync', 'scmrepository' => $clone_url, 'scmbranch' => $branch}, 'cmd', 'scmrepository', 'scmbranch'));
+  };
+  if ($@) {
+    print "rename: failed to trigger the scmsync update for $clone_url#$branch: $@\n";
+    return 0;
+  }
+  return 1;
+}
+
+# The repository $fullname was renamed or transferred to another owner: the
+# projects created for the old name are useless now, gitea moved the git
+# repository to the new one. Delete the projects of the old name, set up the
+# projects of the new name from its branches and drop the packages
+# synchronised from the old name out of the organisation wide package sets;
+# the packages of the new name are created by the package set reconciliation.
+# The payload already carries the new name, the old one is taken from its
+# changes.
+sub handle_repo_rename {
+  my ($batch, $fullname, $clone_url) = @_;
+  return 1 unless defined $autosetup_prefix;
+  my $old_fullname = BSPreset::event_old_fullname($batch);
+  if (!defined($old_fullname)) {
+    print "repo_rename: cannot determine the old name of $fullname, keeping the OBS projects\n";
+    return 1;
+  }
+  my ($old_org, $old_repo) = split('/', $old_fullname, 2);
+  my ($org, $repo) = split('/', $fullname // '', 2);
+  if (!defined($old_org) || !defined($old_repo) || !defined($org) || !defined($repo)) {
+    print "repo_rename: cannot split $old_fullname -> $fullname\n";
+    return 1;
+  }
+  print "repo_rename: $old_org/$old_repo is now $org/$repo\n";
+  my $failed;
+  my ($projects, $err) = search_projects(BSPreset::repo_project_prefix($autosetup_prefix, $old_org, $old_repo));
+  if (!defined $projects) {
+    print "repo_rename: cannot list the OBS projects of $old_org/$old_repo: $err\n";
+    return 0;
+  }
+  delete_project($_) or $failed = 1 for @$projects;
+  my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
+  my $branches = BSGit::git_branches($gitdir);
+  if (!defined($branches)) {
+    my $aerr = BSGit::repo_access_error($gitdir) // "cannot read $gitdir";
+    $aerr =~ s/\n$//;
+    print "repo_rename: $aerr, no projects created for $fullname\n";
+  } else {
+    # like a push event, but for every branch of the renamed repository
+    setup_branch_project($fullname, $clone_url, $_) or $failed = 1 for @$branches;
+    process_org_package_sets($fullname, $_, $clone_url) for @$branches;
+  }
+  purge_org_packages($old_org, $old_repo, undef, $clone_url) or $failed = 1;
   return !$failed;
 }
 

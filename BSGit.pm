@@ -30,7 +30,7 @@ use Errno qw(EACCES ENOENT ENOTDIR);
 
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw(git_show git_capture git_get_default_branch git_ref_exists git_lstree_sources org_repo_names org_repo_members dir_access_error repo_access_error);
+our @EXPORT = qw(git_show git_capture git_get_default_branch git_ref_exists git_branches git_lstree_sources org_repo_names org_repo_members dir_access_error repo_access_error);
 
 # Read the given file from the given branch of a git repository. Returns
 # undef when the repository or the file does not exist (git's error output
@@ -87,6 +87,16 @@ sub git_ref_exists {
   my ($gitdir, $ref) = @_;
   return 0 unless defined $gitdir && defined $ref && length $ref;
   return defined git_capture('--git-dir=' . $gitdir, 'show-ref', '--verify', '-q', $ref);
+}
+
+# List the branch names of a git repository. Returns an empty list for a
+# repository without branches and undef when the repository cannot be read.
+sub git_branches {
+  my ($gitdir) = @_;
+  return undef unless defined $gitdir && length $gitdir;
+  my $lines = git_capture('--git-dir=' . $gitdir, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/');
+  return undef unless defined $lines;
+  return [ grep { length $_ } @$lines ];
 }
 
 # List the package source entries at the given tree level of the given git

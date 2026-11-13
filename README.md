@@ -28,16 +28,19 @@ events. The bridge classifies the delivered payloads:
   scmsync update in OBS
 - branch deleted: deletes the OBS project created for that branch
 - repository deleted: deletes the OBS projects created for all its branches
-- everything else (tag deletions, repository created or renamed, ...) is
-  acknowledged and ignored
+- repository renamed or transferred: deletes the OBS projects of the old name
+  and creates them again for the new one, the gitea payload names the old
+  name in its changes
+- everything else (tag deletions, repository created, ...) is acknowledged
+  and ignored
 
 Deletions also clean up organisation wide package sets: packages synchronised
 from the deleted branch or repository are removed from the OBS projects of the
 other repositories of the organisation. Projects are purged including all
 their packages by a delete on the project source.
 
-Renaming a repository or a branch is not handled yet, the OBS projects of the
-old name stay around and must be removed manually.
+Renaming a branch is not handled yet, the OBS project of the old branch name
+stays around and must be removed manually.
 
 Permissions
 ===========

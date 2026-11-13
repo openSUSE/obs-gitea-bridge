@@ -25,7 +25,7 @@ use BSXML;
 
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix gitea_event_kind event_logline branch_project_name repo_project_prefix sanitize_project_part project_name_in_scope package_name_in_scope git_host scmsync_from_source);
+our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix gitea_event_kind event_old_fullname event_logline branch_project_name repo_project_prefix sanitize_project_part project_name_in_scope package_name_in_scope git_host scmsync_from_source);
 
 # Prefix stripped from repo URLs to derive the OBS path project/repository.
 # Made configurable via config.pm ($BSPreset::gitprefix).
@@ -339,7 +339,8 @@ sub extrapaths_from_parent_meta {
 #   branch_delete  a branch was deleted
 #   tag_delete     a tag was deleted
 #   repo_delete    the repository itself was deleted
-#   repo_event     another repository event (created, renamed, archived, ...)
+#   repo_rename    the repository was renamed or transferred to another owner
+#   repo_event     another repository event (created, archived, ...)
 # Branch and tag deletions arrive as "delete" events carrying a ref_type,
 # repository events carry an action. Payloads of older Gitea versions have no
 # event field; their delete events are then recognised by the absence of the
@@ -361,11 +362,44 @@ sub gitea_event_kind {
     return 'other_delete';
   }
   if ((!defined($event) || $event eq 'repository') && defined $action) {
-    return $action eq 'deleted' ? 'repo_delete' : 'repo_event';
+    return 'repo_delete' if $action eq 'deleted';
+    return 'repo_rename' if $action eq 'renamed' || $action eq 'transferred';
+    return 'repo_event';
   }
   if (!defined($event) || $event eq 'push') {
     my $repository = $batch->{'repository'};
     return 'push' if defined($batch->{'ref'}) && ref($repository) eq 'HASH' && defined($repository->{'clone_url'});
+  }
+  return undef;
+}
+
+# Determine the "ORG/REPO" name a renamed or transferred repository had
+# before the change. The payload of these repository events carries the new
+# name in the repository object and the previous one in its changes: the old
+# repository name for a rename inside the same owner, the old owner for a
+# transfer to another one. Returns undef when the payload does not describe
+# such a change we can undo.
+sub event_old_fullname {
+  my ($batch) = @_;
+  my $kind = gitea_event_kind($batch);
+  return undef unless defined($kind) && $kind eq 'repo_rename';
+  my $repository = $batch->{'repository'};
+  my $fullname = ref($repository) eq 'HASH' ? $repository->{'full_name'} : undef;
+  return undef unless defined($fullname) && $fullname =~ m{^([^/]+)/([^/]+)$};
+  my ($org, $repo) = ($1, $2);
+  my $changes = $batch->{'changes'};
+  return undef unless ref($changes) eq 'HASH';
+  if ($batch->{'action'} eq 'renamed') {
+    my $name = ref($changes->{'name'}) eq 'HASH' ? $changes->{'name'}->{'from'} : undef;
+    return undef unless defined($name) && length($name) && $name ne $repo;
+    return "$org/$name";
+  }
+  # transferred: the old owner is given as a user or an organisation object
+  my $from = ref($changes->{'owner'}) eq 'HASH' ? $changes->{'owner'}->{'from'} : undef;
+  return undef unless ref($from) eq 'HASH';
+  for my $key ('organization', 'user') {
+    my $login = ref($from->{$key}) eq 'HASH' ? $from->{$key}->{'login'} : undef;
+    return "$login/$repo" if defined($login) && length($login) && $login ne $org;
   }
   return undef;
 }
