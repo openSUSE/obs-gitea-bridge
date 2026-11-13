@@ -35,6 +35,7 @@ BEGIN {
 }
 
 use Data::Dumper;
+use Fcntl ':flock';
 use JSON::XS ();
 use MIME::Base64 ();
 
@@ -61,6 +62,7 @@ eval {
   use config;
   $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie" if $config::shared_cookie;
   $obsurl = $config::obsurl if $config::obsurl;
+  $port = $config::port if $config::port;
   $queue_dir = $config::queue_dir if $config::queue_dir;
   $gitea_root = $config::gitea_root if $config::gitea_root;
   $autosetup_prefix = $config::autosetup_prefix if $config::autosetup_prefix;
@@ -71,6 +73,9 @@ eval {
 # OBS api base url without a trailing /public marker, used for the
 # authenticated project meta operations below.
 (my $source_url = $obsurl) =~ s{/public$}{};
+
+# serial to make queue file names unique within this process
+my $queue_serial = 0;
 
 # HTTP Basic Auth header for project meta create/delete operations.
 my $api_auth;
@@ -265,42 +270,74 @@ sub process_org_package_sets {
   }
 }
 
+# Return the pending event files in the queue directory in processing order.
+sub queue_files {
+  return () unless -d $queue_dir;
+  opendir(my $dir_handle, $queue_dir) or return ();
+  my @files = sort grep { /^\d+(?:-\d+)*\.json$/ } readdir($dir_handle);
+  closedir($dir_handle);
+  return @files;
+}
+
+# Work off the event queue. The queue directory is shared by all the preforked
+# server children, so it is processed under an exclusive lock taken in a
+# non-blocking way: a child that does not get the lock hands its event over to
+# the working process and returns. That process re-checks the queue until it
+# stays empty while holding the lock, so handed over events are picked up
+# there before the lock goes away. A failed event aborts the run and stays in
+# the queue for a retry by a later event delivery or a service restart.
 sub process_queue {
   return unless -d $queue_dir;
-
-  opendir(DIR_HANDLE, $queue_dir) or return;
-  my @files = sort grep { /^\d+\.json$/ } readdir(DIR_HANDLE);
-  closedir(DIR_HANDLE);
-  return unless @files;
-
-  for my $file (@files) {
-    my $filepath = "$queue_dir/$file";
-    my $content = do { local $/; open(my $fh, '<', $filepath) or next; binmode($fh); <$fh> };
-    my $batch = JSON::XS::decode_json($content);
-    my $kind = BSPreset::gitea_event_kind($batch);
-    my $repository = ref($batch) eq 'HASH' ? $batch->{'repository'} : undef;
-    my $fullname = ref($repository) eq 'HASH' ? $repository->{'full_name'} : undef;
-    my $clone_url = ref($repository) eq 'HASH' ? $repository->{'clone_url'} : undef;
-
-    my $ok = 1;
-    if (!defined($kind)) {
-      print "Queue: ignoring unsupported event in $file\n";
-    } elsif ($kind eq 'branch_delete') {
-      $ok = handle_branch_delete($fullname, $clone_url, gitref_to_branch($batch->{'ref'}));
-    } elsif ($kind eq 'repo_delete') {
-      $ok = handle_repo_delete($fullname, $clone_url);
-    } elsif ($kind eq 'push') {
-      $ok = handle_push($batch, $fullname, $clone_url);
-    } else {
-      # tag deletions and other repository events do not affect our projects
-      print "Queue: ignoring $kind event in $file\n";
-    }
-    unless ($ok) {
-      print "Queue: failed to process $file, keeping it for a later retry\n";
+  my $lockpath = "$queue_dir/.queue.lock";
+  while (1) {
+    my @files = queue_files();
+    last unless @files;
+    open(my $lock_fh, '>>', $lockpath) or last;
+    unless (flock($lock_fh, LOCK_EX | LOCK_NB)) {
+      close($lock_fh);
+      print "Queue: another process is working the queue, the pending events are picked up there\n";
       last;
     }
-    unlink($filepath) or print "Queue: failed to delete $filepath: $!\n";
-    print "Processed: $kind event for " . (defined($clone_url) ? $clone_url : $fullname) . " from $file\n";
+    # the queue may have changed since the first look
+    @files = queue_files();
+    for my $file (@files) {
+      my $filepath = "$queue_dir/$file";
+      my $content = do { local $/; open(my $fh, '<', $filepath) or next; binmode($fh); <$fh> };
+      my $batch = eval { JSON::XS::decode_json($content) };
+      if (!defined $batch) {
+        # a broken event would block the queue forever, park it aside
+        print "Queue: dropping undecodable event in $file: $@";
+        rename($filepath, "$filepath.bad") or unlink($filepath);
+        next;
+      }
+      my $kind = BSPreset::gitea_event_kind($batch);
+      my $repository = ref($batch) eq 'HASH' ? $batch->{'repository'} : undef;
+      my $fullname = ref($repository) eq 'HASH' ? $repository->{'full_name'} : undef;
+      my $clone_url = ref($repository) eq 'HASH' ? $repository->{'clone_url'} : undef;
+
+      my $ok = 1;
+      if (!defined($kind)) {
+        print "Queue: ignoring unsupported event in $file\n";
+      } elsif ($kind eq 'branch_delete') {
+        $ok = handle_branch_delete($fullname, $clone_url, gitref_to_branch($batch->{'ref'}));
+      } elsif ($kind eq 'repo_delete') {
+        $ok = handle_repo_delete($fullname, $clone_url);
+      } elsif ($kind eq 'push') {
+        $ok = handle_push($batch, $fullname, $clone_url);
+      } else {
+        # tag deletions and other repository events do not affect our projects
+        print "Queue: ignoring $kind event in $file\n";
+      }
+      unless ($ok) {
+        print "Queue: failed to process $file, keeping it for a later retry\n";
+        close($lock_fh);
+        return;
+      }
+      unlink($filepath) or print "Queue: failed to delete $filepath: $!\n";
+      print "Processed: $kind event for " . (defined($clone_url) ? $clone_url : $fullname) . " from $file\n";
+    }
+    close($lock_fh);
+    # events written while we were working are processed in the next round
   }
 }
 
@@ -945,14 +982,19 @@ sub repositoryevent {
   die("no repository given\n") unless ref($batch->{'repository'}) eq 'HASH';
   die("no clone repository given\n") unless $batch->{'repository'}->{'clone_url'};
 
-  # write event to queue file
+  # write event to queue file, uniquely named and atomically visible:
+  # the timestamp alone would collide on events delivered in the same second,
+  # and the file must never be seen half written by process_queue
   my $timestamp = time();
-  my $filepath = "$queue_dir/$timestamp.json";
-  open(my $fh, '>', $filepath) or die("cannot write queue file $filepath: $!\n");
+  my $filename = "$timestamp-$$-" . ++$queue_serial . ".json";
+  my $filepath = "$queue_dir/$filename";
+  my $tmppath = "$filepath.part";
+  open(my $fh, '>', $tmppath) or die("cannot write queue file $tmppath: $!\n");
   binmode($fh);
   # store the event with the normalised event type, not the raw content
   print $fh JSON::XS::encode_json($batch);
-  close($fh);
+  close($fh) or die("cannot write queue file $tmppath: $!\n");
+  rename($tmppath, $filepath) or die("cannot publish queue file $filepath: $!\n");
 
   # try to process queue
   process_queue();
