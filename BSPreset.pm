@@ -82,8 +82,9 @@ sub manifest_package_set {
   return $set;
 }
 
-# Split a git url into its host and owner parts. The host is returned without
-# a scheme or user, the owner is the first path element below the host.
+# Split a git url into its host, owner and repository parts. The host is
+# returned without a scheme or user, the owner is the first path element below
+# the host, the repository is undef for a url which addresses just an owner.
 # Returns undef when the url cannot be parsed.
 sub giturl_host_owner {
   my ($url) = @_;
@@ -100,9 +101,9 @@ sub giturl_host_owner {
   }
   $path =~ s{/+$}{};
   $path =~ s/\.git$//;
-  my ($owner) = split('/', $path, 2);
+  my ($owner, $repo) = split('/', $path, 2);
   return undef unless defined $host && length $host && defined $owner && length $owner;
-  return ($host, $owner);
+  return ($host, $owner, (defined($repo) && length($repo)) ? $repo : undef);
 }
 
 # Resolve the defaults of a package_set from a _manifest against the git url
@@ -111,11 +112,12 @@ sub giturl_host_owner {
 # refers to the Gitea server and organisation the local repository is hosted
 # on. Only the local Gitea instance is supported, so a server different from
 # the repository host is an error. Returns the resolved set as a hashref with
-# server, organisation, branch and exclude (a name -> 1 hashref).
+# server, organisation, branch, exclude (a name -> 1 hashref) and manifest (the
+# lower case "ORG/REPO" of the repository whose _manifest declares the set).
 sub resolve_package_set {
   my ($set, $clone_url) = @_;
   return undef unless ref($set) eq 'HASH';
-  my ($host, $owner) = giturl_host_owner($clone_url);
+  my ($host, $owner, $repo) = giturl_host_owner($clone_url);
   die("cannot determine gitea host and organisation from '$clone_url'\n") unless defined $host;
   my $server = $set->{'server'};
   if (defined $server && length $server) {
@@ -132,18 +134,27 @@ sub resolve_package_set {
     die("invalid exclude list in package_set\n") unless ref($set->{'exclude'}) eq 'ARRAY';
     $exclude{$_} = 1 for grep { defined $_ && !ref $_ && length $_ } @{$set->{'exclude'}};
   }
-  return { 'server' => $host, 'organisation' => $organisation, 'branch' => $set->{'branch'}, 'exclude' => \%exclude };
+  return { 'server' => $host, 'organisation' => $organisation, 'branch' => $set->{'branch'}, 'exclude' => \%exclude,
+    'manifest' => (defined($repo) && length($repo)) ? lc("$owner/$repo") : undef };
 }
 
 # Filter the candidate members (arrayref of {name, branch} hashrefs as
 # returned by BSGit::org_repo_members) through the exclude list of a resolved
-# package_set. Returns a sorted arrayref.
+# package_set. The repository whose _manifest declares the set is never a
+# member: it configures the project and is not one of its packages. Returns a
+# sorted arrayref.
 sub select_members {
   my ($members, $resolved) = @_;
   return [] unless ref($members) eq 'ARRAY';
   my $exclude = ref($resolved) eq 'HASH' ? $resolved->{'exclude'} : undef;
   $exclude = {} unless ref($exclude) eq 'HASH';
-  return [ sort { $a->{'name'} cmp $b->{'name'} } grep { ref($_) eq 'HASH' && defined $_->{'name'} && length $_->{'name'} && !$exclude->{$_->{'name'}} } @$members ];
+  my $manifest = ref($resolved) eq 'HASH' ? $resolved->{'manifest'} : undef;
+  my $org = ref($resolved) eq 'HASH' && defined $resolved->{'organisation'} ? lc($resolved->{'organisation'}) : '';
+  return [ sort { $a->{'name'} cmp $b->{'name'} } grep {
+    ref($_) eq 'HASH' && defined $_->{'name'} && length $_->{'name'}
+      && !$exclude->{$_->{'name'}}
+      && !(defined($manifest) && "$org/$_->{'name'}" eq $manifest)
+  } @$members ];
 }
 
 # Turn a git repository name into a valid OBS package name.

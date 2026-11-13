@@ -326,6 +326,19 @@ ok($res->{'success'}, 'push event for the package_set repository is acknowledged
 ok(have_request('PUT /source/git:testorg:setmeta:main/_meta'), 'the package_set project was created');
 ok(have_request('PUT /source/git:testorg:setmeta:main/pkg-a/_meta'), 'the member package was created');
 is(read_file(state_path('/source/git:testorg:setmeta:main/_config')), $config1, 'the _config reached the project');
+ok(!have_request('PUT /source/git:testorg:setmeta:main/setmeta/_meta'), 'the manifest repository did not become a package');
+
+# a manifest repository package left over from an older bridge is removed by
+# the reconciliation of the next event
+my $legacy = state_path('/source/git:testorg:setmeta:main/setmeta');
+make_path($legacy);
+open(my $lfh, '>', "$legacy/_meta") or die "cannot write the legacy package meta: $!";
+print $lfh '<package name="setmeta" project="git:testorg:setmeta:main"><title></title>'
+         . '<scmsync>http://localhost/testorg/setmeta.git#main</scmsync><url></url></package>';
+close($lfh);
+$res = push_event('testorg/setmeta');
+ok($res->{'success'}, 'push event over the legacy package is acknowledged');
+ok(have_request('DELETE /source/git:testorg:setmeta:main/setmeta'), 'the package of the manifest repository was removed again');
 
 move_repo('setmeta', 'setmeta2');
 $res = rename_event('testorg/setmeta2', 'setmeta');
@@ -333,6 +346,7 @@ ok($res->{'success'}, 'rename of the package_set repository is acknowledged');
 ok(have_request('DELETE /source/git:testorg:setmeta:main'), 'the package_set project of the old name was deleted');
 ok(have_request('PUT /source/git:testorg:setmeta2:main/_meta'), 'the package_set project was created under the new name');
 ok(have_request('PUT /source/git:testorg:setmeta2:main/pkg-a/_meta'), 'the member package came along');
+ok(!have_request('PUT /source/git:testorg:setmeta2:main/setmeta2/_meta'), 'the manifest repository did not become a package');
 is(read_file(state_path('/source/git:testorg:setmeta2:main/_config')), $config1, 'the _config came along to the new project');
 
 # --- a repository without _manifest: only the org packages are refreshed -------

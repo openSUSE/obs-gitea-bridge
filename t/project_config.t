@@ -273,6 +273,7 @@ ok($res->{'success'}, 'push event is acknowledged');
 like(join("\n", @{ obs_requests() }), qr{^\QPUT /source/$project/_meta\E$}m, 'the project meta was updated');
 is(read_file($config_state), $config1, 'the _config file reached the project');
 like(join("\n", @{ obs_requests() }), qr{^\QPUT /source/$project/pkg-a/_meta\E$}m, 'the member package was set up');
+is(count_requests(qr{^\QPUT /source/$project/meta/_meta\E$}), 0, 'the manifest repository did not become a package');
 
 # --- an unchanged _config does not create another revision -------------------
 $res = push_meta_event();

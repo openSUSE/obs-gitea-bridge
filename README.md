@@ -107,10 +107,12 @@ package_set:
   scmsync. The bridge enumerates the organisation's repositories with that
   branch below $gitea_root and creates one OBS package per repository with a
   package level scmsync url (GIT_URL#BRANCH), deleting packages whose
-  repository or branch disappeared. Pushes to any repository of the
-  organisation re-scan the organisation for a manifest declaring the
-  package_set, so the manifest can live in a single repository of the
-  organisation. Fork handling does not apply to package_set projects.
+  repository or branch disappeared. The repository carrying the _manifest
+  configures the project itself, it never becomes one of its packages. Pushes
+  to any repository of the organisation re-scan the organisation for a
+  manifest declaring the package_set, so the manifest can live in a single
+  repository of the organisation. Fork handling does not apply to package_set
+  projects.
 
   Show the resulting package list without touching OBS:
 

@@ -78,9 +78,12 @@ is_deeply($defaults, [
 is_deeply(BSGit::org_repo_members($root, 'missing-org', 'factory'), [], 'members of unknown organisation -> empty');
 
 # --- combined with BSPreset selection ---
-my $resolved = BSPreset::resolve_package_set({ 'branch' => 'factory', 'exclude' => ['repo-b'] }, 'https://gitea.example.com/TestOrg/repo-a.git');
+my $resolved = BSPreset::resolve_package_set({ 'branch' => 'factory', 'exclude' => ['repo-b'] }, 'https://gitea.example.com/TestOrg/meta.git');
 my $selected = BSPreset::select_members(BSGit::org_repo_members($root, $resolved->{'organisation'}, $resolved->{'branch'}), $resolved);
 is_deeply([ map { $_->{'name'} } @$selected ], ['repo-a'], 'exclude list filters the enumerated members');
+my $own_resolved = BSPreset::resolve_package_set({ 'branch' => 'factory' }, 'https://gitea.example.com/TestOrg/repo-a.git');
+my $own_selected = BSPreset::select_members(BSGit::org_repo_members($root, $own_resolved->{'organisation'}, $own_resolved->{'branch'}), $own_resolved);
+is_deeply([ map { $_->{'name'} } @$own_selected ], ['repo-b'], 'the manifest repository is no member of its own package_set');
 is(BSPreset::scmsync_url_for('https://gitea.example.com/TestOrg/repo-a.git', $resolved->{'organisation'}, 'repo-a', 'factory'),
    'https://gitea.example.com/TestOrg/repo-a.git#factory', 'member scmsync url');
 

@@ -267,10 +267,11 @@ eval { BSPreset::manifest_package_set("key: [unclosed") };
 like($@, qr/cannot parse _manifest/, 'invalid yaml dies in package_set parse');
 
 # --- giturl_host_owner ---
-is_deeply([BSPreset::giturl_host_owner('https://git.example.com/MyOrg/my-repo.git')], ['git.example.com', 'MyOrg'], 'https url split');
-is_deeply([BSPreset::giturl_host_owner('http://git.example.com/org/repo')], ['git.example.com', 'org'], 'http url without .git split');
-is_deeply([BSPreset::giturl_host_owner('git@git.example.com:Org/repo.git')], ['git.example.com', 'Org'], 'scp style url split');
-is_deeply([BSPreset::giturl_host_owner('ssh://git@git.example.com/org/repo.git')], ['git.example.com', 'org'], 'ssh url with user split');
+is_deeply([BSPreset::giturl_host_owner('https://git.example.com/MyOrg/my-repo.git')], ['git.example.com', 'MyOrg', 'my-repo'], 'https url split');
+is_deeply([BSPreset::giturl_host_owner('http://git.example.com/org/repo')], ['git.example.com', 'org', 'repo'], 'http url without .git split');
+is_deeply([BSPreset::giturl_host_owner('git@git.example.com:Org/repo.git')], ['git.example.com', 'Org', 'repo'], 'scp style url split');
+is_deeply([BSPreset::giturl_host_owner('ssh://git@git.example.com/org/repo.git')], ['git.example.com', 'org', 'repo'], 'ssh url with user split');
+is_deeply([BSPreset::giturl_host_owner('https://git.example.com/onlyowner')], ['git.example.com', 'onlyowner', undef], 'url without repository');
 is(BSPreset::giturl_host_owner('nonsense'), undef, 'unparsable url -> undef');
 is(BSPreset::giturl_host_owner(undef), undef, 'undef url -> undef');
 
@@ -280,6 +281,7 @@ is($rs->{'server'}, 'git.example.com', 'server defaults to the repository host')
 is($rs->{'organisation'}, 'MyOrg', 'organisation defaults to the repository owner');
 is($rs->{'branch'}, 'factory', 'branch kept');
 is_deeply($rs->{'exclude'}, {}, 'no exclude list by default');
+is($rs->{'manifest'}, 'myorg/main-repo', 'the manifest repository is remembered lower case');
 
 my $rs2 = BSPreset::resolve_package_set({ 'organisation' => 'other-org', 'branch' => 'stable' }, 'git@git.example.com:MyOrg/main-repo.git');
 is($rs2->{'organisation'}, 'other-org', 'explicit organisation overrides the owner default');
@@ -299,6 +301,14 @@ my $selected = BSPreset::select_members(\@members_in, { 'exclude' => { 'old-stuf
 is_deeply([ map { $_->{'name'} } @$selected ], ['a-repo', 'b-repo'], 'members excluded and sorted');
 my $all = BSPreset::select_members(\@members_in, undef);
 is_deeply([ map { $_->{'name'} } @$all ], ['a-repo', 'b-repo', 'old-stuff'], 'no exclude keeps all, sorted by name');
+
+# the repository of the _manifest is never a member of its own package_set
+my $own_rs = BSPreset::resolve_package_set({ 'branch' => 'factory' }, 'https://git.example.com/MyOrg/a-repo.git');
+is_deeply([ map { $_->{'name'} } @{ BSPreset::select_members(\@members_in, $own_rs) } ], ['b-repo', 'old-stuff'],
+  'the manifest repository is filtered out');
+my $other_rs = BSPreset::resolve_package_set({ 'branch' => 'factory', 'organisation' => 'OtherOrg' }, 'https://git.example.com/MyOrg/a-repo.git');
+is_deeply([ map { $_->{'name'} } @{ BSPreset::select_members(\@members_in, $other_rs) } ], ['a-repo', 'b-repo', 'old-stuff'],
+  'a manifest of another organisation does not filter the members');
 
 # --- sanitize_package_name ---
 is(BSPreset::sanitize_package_name('hello-world_2.3'), 'hello-world_2.3', 'valid name passes through');
