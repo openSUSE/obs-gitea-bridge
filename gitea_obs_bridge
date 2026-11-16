@@ -58,6 +58,12 @@ my $gitea_root = "/var/lib/gitea/data";
 my $autosetup_prefix;
 my $api_username;
 my $api_password;
+# organisations we never run the package_set manifest discovery scan on; huge
+# organisations would turn every event into one git lookup per repository
+my @org_scan_exclude = ('pool');
+# seconds a manifest discovery result is trusted before the organisation is
+# scanned again as a backstop for missed events
+my $orgset_scan_ttl = 3600;
 eval {
   use config;
   $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie" if $config::shared_cookie;
@@ -68,6 +74,8 @@ eval {
   $autosetup_prefix = $config::autosetup_prefix if $config::autosetup_prefix;
   $api_username = $config::api_username if defined $config::api_username;
   $api_password = $config::api_password if defined $config::api_password;
+  @org_scan_exclude = @config::org_scan_exclude if @config::org_scan_exclude;
+  $orgset_scan_ttl = $config::orgset_scan_ttl if $config::orgset_scan_ttl;
 };
 
 # OBS api base url without a trailing /public marker, used for the
@@ -227,26 +235,66 @@ sub clone_url_for_repo {
   return $url;
 }
 
-# Scan the organisation of an event for _manifest files declaring a
-# package_set for it and refresh the corresponding organisation projects, so
-# pushes to any member repository keep the package list of the org project
-# up to date. The manifest may live in any repository of the organisation, it
-# is looked up on the branch of the event.
-sub process_org_package_sets {
-  my ($fullname, $branch, $clone_url) = @_;
-  return unless defined $autosetup_prefix && defined $gitea_root;
-  return unless defined $fullname && $fullname =~ m{^([^/]+)/} && defined $branch && length $branch;
-  return unless defined $clone_url && length $clone_url;
-  my $org = $1;
+# The package_set manifest discovery cache: maps "org#branch" to the
+# repositories of the organisation which carried a _manifest declaring a
+# package_set on that branch at the time of the scan. It lives in the queue
+# directory, so it survives restarts and is shared by the preforked children.
+# Concurrent writers do a load, update and atomic replace: a lost update only
+# costs a redundant scan, never a wrong project state.
+sub orgset_cache_path {
+  return "$queue_dir/.orgset-cache.json";
+}
+
+sub orgset_cache_load {
+  my $raw = do { local $/; open(my $fh, '<', orgset_cache_path()) or return {}; binmode($fh); <$fh> };
+  my $data = eval { JSON::XS::decode_json($raw) };
+  return {} unless ref($data) eq 'HASH';
+  return $data;
+}
+
+sub orgset_cache_save {
+  my ($cache) = @_;
+  my $tmp = orgset_cache_path() . ".tmp.$$";
+  open(my $fh, '>', $tmp) or return;
+  print $fh JSON::XS::encode_json($cache);
+  close($fh);
+  rename($tmp, orgset_cache_path()) or unlink($tmp);
+}
+
+# Forget the discovery results of an organisation after its repository store
+# changed shape (repository or branch deleted, renamed), so the next event
+# runs a fresh scan instead of trusting a stale manifest list.
+sub orgset_cache_invalidate {
+  my ($org) = @_;
+  return unless defined $org && length $org;
+  my $cache = orgset_cache_load();
+  my $prefix = lc($org) . '#';
+  my $changed;
+  for my $key (keys %$cache) {
+    next unless index($key, $prefix) == 0;
+    delete $cache->{$key};
+    $changed = 1;
+  }
+  orgset_cache_save($cache) if $changed;
+}
+
+# Discovery scan: list the repositories of the organisation which carry a
+# _manifest declaring a package_set on the given branch. Repositories without
+# the branch are dropped by the pure-perl ref check, so scanning a large
+# organisation costs stat calls instead of one git fork per repository.
+sub find_org_set_manifests {
+  my ($org, $branch) = @_;
   my $orgdir = "$gitea_root/gitea-repositories/" . lc($org);
   my $names = BSGit::org_repo_names($gitea_root, $org);
   if (!@$names) {
     my $aerr = BSGit::dir_access_error($orgdir);
     print "org package_set: $aerr" if $aerr;
-    return;
+    return [];
   }
+  my @found;
   for my $name (@$names) {
     my $gitdir = "$orgdir/$name.git";
+    next unless BSGit::git_ref_exists($gitdir, "refs/heads/$branch");
     my $manifest = git_show($gitdir, $branch, '_manifest');
     if (!defined $manifest) {
       my $aerr = BSGit::repo_access_error($gitdir);
@@ -255,20 +303,80 @@ sub process_org_package_sets {
     }
     my $set = eval { BSPreset::manifest_package_set($manifest) };
     next if $@ || ref($set) ne 'HASH';
-    my $manifest_clone = clone_url_for_repo($clone_url, $org, $name);
-    my $resolved = eval { BSPreset::resolve_package_set($set, $manifest_clone) };
-    print "org package_set in $org/$name: $@" if $@;
-    next if $@ || !defined $resolved;
-    next unless $resolved->{'organisation'} eq $org;
-    # only sets covering the branch of this event concern us here
-    next unless $resolved->{'branch'} eq $branch || $resolved->{'branch'} eq 'default';
-    my $projectname = BSPreset::branch_project_name($autosetup_prefix, $org, $name, $branch);
-    # the _config belongs to the tree of the manifest which configures the project
-    my $config = git_show($gitdir, $branch, '_config');
-    eval {
-      setup_package_set_project($projectname, BSPreset::manifest_presets($manifest), undef, "$manifest_clone#$branch", $set, $config);
-    };
-    print "org package_set: failed to refresh $projectname: $@\n" if $@;
+    push @found, $name;
+  }
+  return \@found;
+}
+
+# Refresh the organisation project configured by the _manifest of
+# $org/$name#$branch when that manifest declares a package_set covering the
+# branch of the event. Returns false when the manifest is gone or no longer
+# declares a set, so the caller can drop the repository from the cache.
+sub refresh_org_set {
+  my ($org, $name, $branch, $clone_url) = @_;
+  my $gitdir = "$gitea_root/gitea-repositories/" . lc($org) . "/$name.git";
+  my $manifest = git_show($gitdir, $branch, '_manifest');
+  if (!defined $manifest) {
+    my $aerr = BSGit::repo_access_error($gitdir);
+    print "org package_set: $aerr" if $aerr;
+    return 0;
+  }
+  my $set = eval { BSPreset::manifest_package_set($manifest) };
+  return 0 if $@ || ref($set) ne 'HASH';
+  my $manifest_clone = clone_url_for_repo($clone_url, $org, $name);
+  my $resolved = eval { BSPreset::resolve_package_set($set, $manifest_clone) };
+  print "org package_set in $org/$name: $@" if $@;
+  return 0 if $@ || !defined $resolved;
+  return 0 unless $resolved->{'organisation'} eq $org;
+  # only sets covering the branch of this event concern us here
+  return 0 unless $resolved->{'branch'} eq $branch || $resolved->{'branch'} eq 'default';
+  my $projectname = BSPreset::branch_project_name($autosetup_prefix, $org, $name, $branch);
+  # the _config belongs to the tree of the manifest which configures the project
+  my $config = git_show($gitdir, $branch, '_config');
+  eval {
+    setup_package_set_project($projectname, BSPreset::manifest_presets($manifest), undef, "$manifest_clone#$branch", $set, $config);
+  };
+  print "org package_set: failed to refresh $projectname: $@\n" if $@;
+  return 1;
+}
+
+# Refresh the organisation wide package set projects an event may affect.
+# The manifest may live in any repository of the organisation, so a scan is
+# needed to find it - but only when the shape of the organisation changed: a
+# plain commit push cannot make repositories appear, disappear or rename
+# themselves. Those scans run on branch creation events, on a cache miss for
+# (organisation, branch) and after the ttl expires as a backstop for missed
+# deliveries. Every other push just re-reads the manifests of the previous
+# scan, usually one repository. Organisations on the $org_scan_exclude list
+# are never scanned: their org projects are kept up to date by the push
+# events of the manifest repository itself, which carry the manifest.
+sub process_org_package_sets {
+  my ($fullname, $branch, $clone_url, $rescan) = @_;
+  return unless defined $autosetup_prefix && defined $gitea_root;
+  return unless defined $fullname && $fullname =~ m{^([^/]+)/} && defined $branch && length $branch;
+  return unless defined $clone_url && length $clone_url;
+  my $org = $1;
+  if (grep { lc($_) eq lc($org) } @org_scan_exclude) {
+    print "org package_set: not scanning organisation $org\n";
+    return;
+  }
+  my $key = lc($org) . '#' . $branch;
+  my $cache = orgset_cache_load();
+  my $entry = $cache->{$key};
+  if ($rescan || ref($entry) ne 'HASH' || !defined $entry->{'ts'} || time - $entry->{'ts'} > $orgset_scan_ttl) {
+    $entry = { 'ts' => time, 'repos' => find_org_set_manifests($org, $branch) };
+    $cache->{$key} = $entry;
+    orgset_cache_save($cache);
+    print "org package_set: scanned $org#$branch, " . (0 + @{$entry->{'repos'}}) . " manifest repositories\n";
+  }
+  my @live;
+  for my $name (@{ $entry->{'repos'} || [] }) {
+    push @live, $name if refresh_org_set($org, $name, $branch, $clone_url);
+  }
+  if (@live != @{ $entry->{'repos'} || [] }) {
+    # manifests disappeared or stopped declaring a set, keep the cache honest
+    $entry->{'repos'} = \@live;
+    orgset_cache_save($cache);
   }
 }
 
@@ -379,8 +487,10 @@ sub handle_push {
   }
 
   # pushes to the other repositories of an organisation wide package_set
-  # refresh the package list of the organisation project as well
-  process_org_package_sets($fullname, $branch, $clone_url) unless defined $own_set;
+  # refresh the package list of the organisation project as well; only a new
+  # branch can change which repositories declare or join a set, so that is
+  # the only case where the organisation has to be scanned for manifests
+  process_org_package_sets($fullname, $branch, $clone_url, $batch->{'created'}) unless defined $own_set;
 
   my $cgi = { 'cmd'           => 'triggerscmsync',
 		'scmrepository' => $clone_url,
@@ -413,6 +523,7 @@ sub handle_branch_delete {
     return 1;
   }
   print "branch_delete: $org/$repo#$branch was deleted\n";
+  orgset_cache_invalidate($org);
   my $failed;
   my $projectname = BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch);
   my (undef, $err) = get_project_meta($projectname);
@@ -443,6 +554,7 @@ sub handle_repo_delete {
     return 1;
   }
   print "repo_delete: $org/$repo was deleted\n";
+  orgset_cache_invalidate($org);
   my $failed;
   my ($projects, $err) = search_projects(BSPreset::repo_project_prefix($autosetup_prefix, $org, $repo));
   if (!defined $projects) {
@@ -510,6 +622,8 @@ sub handle_repo_rename {
     return 1;
   }
   print "repo_rename: $old_org/$old_repo is now $org/$repo\n";
+  orgset_cache_invalidate($old_org);
+  orgset_cache_invalidate($org);
   my $failed;
   my ($projects, $err) = search_projects(BSPreset::repo_project_prefix($autosetup_prefix, $old_org, $old_repo));
   if (!defined $projects) {
@@ -526,7 +640,8 @@ sub handle_repo_rename {
   } else {
     # like a push event, but for every branch of the renamed repository
     setup_branch_project($fullname, $clone_url, $_) or $failed = 1 for @$branches;
-    process_org_package_sets($fullname, $_, $clone_url) for @$branches;
+    # the cache was invalidated above, so these rescan the organisation
+    process_org_package_sets($fullname, $_, $clone_url, 1) for @$branches;
   }
   purge_org_packages($old_org, $old_repo, undef, $clone_url) or $failed = 1;
   return !$failed;

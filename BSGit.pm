@@ -72,21 +72,61 @@ sub git_capture {
   return \@lines;
 }
 
-# Return the short name of the default branch of the given git repository,
-# or undef when it cannot be determined.
-sub git_get_default_branch {
-  my ($gitdir) = @_;
-  return undef unless defined $gitdir;
-  my $out = git_capture('--git-dir=' . $gitdir, 'symbolic-ref', '--short', 'HEAD');
-  return undef unless $out && defined $out->[0] && length $out->[0];
-  return $out->[0];
+# Read the contents of a single ref file, whitespace stripped, or undef when
+# the file does not exist or is empty.
+sub read_ref_file {
+  my ($path) = @_;
+  open(my $fh, '<', $path) or return undef;
+  my $line = <$fh>;
+  close($fh);
+  return undef unless defined $line;
+  $line =~ s/\s+$//;
+  return length($line) ? $line : undef;
 }
 
-# Return whether the given ref exists in the git repository.
+# Look up a ref name in a packed-refs file. The lines are "<sha> <refname>",
+# "#" comment lines and "^<sha>" peel lines which belong to the preceding tag
+# ref are skipped. Returns the sha or undef.
+sub read_packed_ref {
+  my ($path, $ref) = @_;
+  open(my $fh, '<', $path) or return undef;
+  my $found;
+  while (my $line = <$fh>) {
+    next if $line =~ /^[#\^]/;
+    chomp $line;
+    my ($sha, $name) = split(' ', $line, 2);
+    next unless defined $name;
+    if ($name eq $ref) {
+      $found = $sha;
+      last;
+    }
+  }
+  close($fh);
+  return $found;
+}
+
+# Return the short name of the default branch of the given git repository,
+# or undef when it cannot be determined. Reads the HEAD file directly: on a
+# large instance every fork saved matters, the organisation scans check the
+# refs of thousands of repositories.
+sub git_get_default_branch {
+  my ($gitdir) = @_;
+  return undef unless defined $gitdir && length $gitdir;
+  my $head = read_ref_file("$gitdir/HEAD");
+  return undef unless defined $head;
+  return undef unless $head =~ m{^ref: refs/heads/(.+)$};
+  return $1;
+}
+
+# Return whether the given ref exists in the git repository. The loose ref
+# file and packed-refs are read directly instead of forking git, so this
+# stays cheap when run over thousands of repositories.
 sub git_ref_exists {
   my ($gitdir, $ref) = @_;
   return 0 unless defined $gitdir && defined $ref && length $ref;
-  return defined git_capture('--git-dir=' . $gitdir, 'show-ref', '--verify', '-q', $ref);
+  my $loose = read_ref_file("$gitdir/$ref");
+  return 1 if defined $loose && $loose !~ /^ref:/;
+  return defined(read_packed_ref("$gitdir/packed-refs", $ref)) ? 1 : 0;
 }
 
 # List the branch names of a git repository. Returns an empty list for a

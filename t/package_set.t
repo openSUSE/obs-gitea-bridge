@@ -87,6 +87,18 @@ is_deeply([ map { $_->{'name'} } @$own_selected ], ['repo-b'], 'the manifest rep
 is(BSPreset::scmsync_url_for('https://gitea.example.com/TestOrg/repo-a.git', $resolved->{'organisation'}, 'repo-a', 'factory'),
    'https://gitea.example.com/TestOrg/repo-a.git#factory', 'member scmsync url');
 
+# --- refs hidden in packed-refs ---
+# the pure perl lookups must find refs that git pack-refs moved out of the
+# loose ref files
+is(system('git', "--git-dir=$root/gitea-repositories/testorg/repo-a.git", 'pack-refs', '--all'), 0, 'pack the refs of repo-a');
+ok(!-f "$root/gitea-repositories/testorg/repo-a.git/refs/heads/factory", 'the loose ref is gone after packing');
+ok(BSGit::git_ref_exists("$root/gitea-repositories/testorg/repo-a.git", 'refs/heads/factory'), 'packed branch found');
+ok(BSGit::git_ref_exists("$root/gitea-repositories/testorg/repo-a.git", 'refs/heads/main'), 'second packed branch found');
+ok(!BSGit::git_ref_exists("$root/gitea-repositories/testorg/repo-a.git", 'refs/heads/nope'), 'missing branch not found in packed-refs');
+ok(!BSGit::git_ref_exists("$root/gitea-repositories/testorg/repo-a.git", 'refs/tags/nope'), 'missing tag not found in packed-refs');
+is(BSGit::git_get_default_branch("$root/gitea-repositories/testorg/repo-a.git"), 'main', 'default branch of the packed repo-a');
+is_deeply(BSGit::org_repo_members($root, 'TestOrg', 'factory'), [ { 'name' => 'repo-a', 'branch' => 'factory' }, { 'name' => 'repo-b', 'branch' => 'factory' } ], 'member enumeration finds packed refs');
+
 # --- dir_access_error / repo_access_error ---
 is(BSGit::dir_access_error($root), undef, 'readable directory -> no access error');
 is(BSGit::dir_access_error("$root/does-not-exist"), undef, 'missing directory -> no access error');

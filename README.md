@@ -108,15 +108,39 @@ package_set:
   branch below $gitea_root and creates one OBS package per repository with a
   package level scmsync url (GIT_URL#BRANCH), deleting packages whose
   repository or branch disappeared. The repository carrying the _manifest
-  configures the project itself, it never becomes one of its packages. Pushes
-  to any repository of the organisation re-scan the organisation for a
-  manifest declaring the package_set, so the manifest can live in a single
-  repository of the organisation. Fork handling does not apply to package_set
-  projects.
+  configures the project itself, it never becomes one of its packages. Fork
+  handling does not apply to package_set projects.
 
   Show the resulting package list without touching OBS:
 
     gitea_obs_bridge --show-project https://gitea.example.com/org/repo.git#factory
+
+Organisation scans
+==================
+
+The manifest declaring a package_set may live in any repository of the
+organisation, so finding it means looking at the _manifest files of all
+repositories of that organisation. The bridge does not do this on every push:
+
+- a push to a repository with a _manifest sets up its own project and, when
+  the manifest declares a package_set, reconciles that organisation project
+  directly
+- any other push only re-reads the manifests found by a previous discovery
+  scan; repositories without the branch of the event are filtered by a
+  pure-perl ref check, so even a scan stays cheap on large instances
+- the full discovery scan runs when a branch is created (the only push that
+  can add a member or a manifest), on a cache miss for (organisation,
+  branch), and after orgset_scan_ttl seconds as a backstop for missed
+  deliveries; repository and branch deletions and renames drop the cached
+  scan results of the organisation
+
+The scan results are kept in $queue_dir/.orgset-cache.json, shared by the
+preforked children and preserved across restarts.
+
+Organisations listed in org_scan_exclude (pool by default) are never scanned
+at all: on a huge organisation even the filtered scan is too much work per
+event, and their package_set projects are maintained through the push events
+of the manifest repository itself, which always carry the manifest.
 
 
    

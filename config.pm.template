@@ -31,4 +31,16 @@ our $gitea_root    = '/var/lib/gitea/data';
 # this. Projects are created as PREFIX:ORGANISATION:REPOSITORY:BRANCH.
 our $autosetup_prefix = 'git';
 
+# Organisations the bridge never scans for package_set _manifest files. A
+# discovery scan reads the _manifest of every repository of the organisation,
+# which is too expensive for huge organisations. Their package_set projects
+# are kept up to date by the push events of the manifest repository itself.
+# Defaults to pool. Set to an empty list to scan every organisation.
+our @org_scan_exclude = ('pool');
+
+# Seconds a package_set manifest discovery result is trusted before the
+# organisation is scanned again as a backstop for missed events (default
+# 3600). Branch creation events always rescan immediately.
+# our $orgset_scan_ttl = 3600;
+
 1;
