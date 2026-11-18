@@ -8,7 +8,7 @@ test:
 
 install:
 	install -d $(DESTDIR)$(codedir)
-	install -m 0644 BSCpio.pm BSHTTP.pm BSServer.pm BSUtil.pm BSDispatch.pm BSRPC.pm BSSSL.pm BSXML.pm BSPreset.pm BSGit.pm config.pm.template $(DESTDIR)$(codedir)
+	install -m 0644 BSCpio.pm BSHTTP.pm BSServer.pm BSUtil.pm BSDispatch.pm BSRPC.pm BSSSL.pm BSXML.pm Manifest.pm Gitea.pm config.pm.template $(DESTDIR)$(codedir)
 	install -m 0755 gitea_obs_bridge $(DESTDIR)$(codedir)
 	install -d $(DESTDIR)$(servicedir)
 	install -m 0644 obs-gitea-bridge.service $(DESTDIR)$(servicedir)

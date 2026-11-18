@@ -22,7 +22,7 @@
 # bare git object stores below $gitea_root/gitea-repositories.
 #
 
-package BSGit;
+package Gitea;
 
 use strict;
 

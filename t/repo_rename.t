@@ -157,7 +157,7 @@ sub start_fake_obs {
         if (defined $path && $path =~ m{/configuration$}) {
           ($status, $ans) = ('200 OK',
             "<configuration><download_url>https://download.example.org/</download_url></configuration>\n");
-        } elsif (defined $path && $path =~ m{/search/project$}) {
+        } elsif (defined $path && $path =~ m{/search/project(/id)?$}) {
           # only the starts-with match the bridge sends is supported
           my ($prefix) = url_decode($query // '') =~ /match=starts-with\(\@name,'([^']*)'\)/;
           my @hits;

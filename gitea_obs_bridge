@@ -43,8 +43,8 @@ use BSServer;
 use BSRPC ':https';
 use BSDispatch;
 use BSXML;
-use BSPreset;
-use BSGit;
+use Manifest;
+use Gitea;
 
 use strict;
 
@@ -95,13 +95,13 @@ if (defined $api_username && defined $api_password) {
 # the prefix stripped from repo urls when deriving the OBS path
 # project/repository. Only needed for the analysing http server.
 eval {
-  my $body = BSRPC::rpc({ 'uri' => "$obsurl/configuration",
+  my $conf = BSRPC::rpc({ 'uri' => "$obsurl/configuration",
                           'request' => 'GET',
                           'headers' => [$header],
-                          'timeout' => 30 }, undef);
-  my ($download_url) = ($body =~ m{<download_url>\s*([^<]+?)\s*</download_url>});
-  $BSPreset::gitprefix = BSPreset::normalize_gitprefix($download_url) if defined $download_url && length $download_url;
-  print "using download_url $BSPreset::gitprefix\n";
+                          'timeout' => 30 }, $BSXML::configuration);
+  my $download_url = ref($conf) eq 'HASH' ? $conf->{'download_url'} : undef;
+  $Manifest::gitprefix = Manifest::normalize_gitprefix($download_url) if defined $download_url && length $download_url;
+  print "using download_url $Manifest::gitprefix\n";
 } unless @ARGV;
 print "failed to read download_url from $obsurl/configuration: $@\n" if $@;
 
@@ -190,7 +190,7 @@ sub fork_changed_package_sources {
   $parent_branch = $branch unless defined $parent_branch;
   my $gitdir = "$gitea_root/gitea-repositories/" . lc($repository->{'full_name'}) . ".git";
   my $parent_gitdir = "$gitea_root/gitea-repositories/" . lc($parent->{'full_name'}) . ".git";
-  my $subdirectories = eval { BSPreset::manifest_subdirectories($manifest) };
+  my $subdirectories = eval { Manifest::subdirectories($manifest) };
   return undef if $@;
   my %entries;
   if (ref($subdirectories) eq 'ARRAY' && @$subdirectories) {
@@ -200,7 +200,7 @@ sub fork_changed_package_sources {
   } else {
     $entries{''} = git_lstree_sources($gitdir, $branch);
   }
-  my $dirs = BSPreset::package_source_dirs($subdirectories, %entries);
+  my $dirs = Manifest::package_source_dirs($subdirectories, %entries);
   my %hashes;
   my %parent_hashes;
   for my $dir (@$dirs) {
@@ -209,7 +209,7 @@ sub fork_changed_package_sources {
     my $pout = git_capture('--git-dir=' . $parent_gitdir, 'rev-parse', "$parent_branch:$dir");
     $parent_hashes{$dir} = $pout->[0] if $pout && defined $pout->[0];
   }
-  return [ sort @{ BSPreset::changed_package_sources($dirs, \%hashes, \%parent_hashes) } ];
+  return [ sort @{ Manifest::changed_package_sources($dirs, \%hashes, \%parent_hashes) } ];
 }
 
 # Return the branch of the forked-from repository from a fork batch, or undef
@@ -230,7 +230,7 @@ sub parent_branch_of {
 # as the given reference clone url.
 sub clone_url_for_repo {
   my ($clone_url, $org, $name) = @_;
-  my $url = BSPreset::scmsync_url_for($clone_url, $org, $name, '_');
+  my $url = Manifest::scmsync_url_for($clone_url, $org, $name, '_');
   $url =~ s/\#_$// if defined $url;
   return $url;
 }
@@ -285,23 +285,23 @@ sub orgset_cache_invalidate {
 sub find_org_set_manifests {
   my ($org, $branch) = @_;
   my $orgdir = "$gitea_root/gitea-repositories/" . lc($org);
-  my $names = BSGit::org_repo_names($gitea_root, $org);
+  my $names = Gitea::org_repo_names($gitea_root, $org);
   if (!@$names) {
-    my $aerr = BSGit::dir_access_error($orgdir);
+    my $aerr = Gitea::dir_access_error($orgdir);
     print "org package_set: $aerr" if $aerr;
     return [];
   }
   my @found;
   for my $name (@$names) {
     my $gitdir = "$orgdir/$name.git";
-    next unless BSGit::git_ref_exists($gitdir, "refs/heads/$branch");
+    next unless Gitea::git_ref_exists($gitdir, "refs/heads/$branch");
     my $manifest = git_show($gitdir, $branch, '_manifest');
     if (!defined $manifest) {
-      my $aerr = BSGit::repo_access_error($gitdir);
+      my $aerr = Gitea::repo_access_error($gitdir);
       print "org package_set: $aerr" if $aerr;
       next;
     }
-    my $set = eval { BSPreset::manifest_package_set($manifest) };
+    my $set = eval { Manifest::package_set($manifest) };
     next if $@ || ref($set) ne 'HASH';
     push @found, $name;
   }
@@ -317,24 +317,24 @@ sub refresh_org_set {
   my $gitdir = "$gitea_root/gitea-repositories/" . lc($org) . "/$name.git";
   my $manifest = git_show($gitdir, $branch, '_manifest');
   if (!defined $manifest) {
-    my $aerr = BSGit::repo_access_error($gitdir);
+    my $aerr = Gitea::repo_access_error($gitdir);
     print "org package_set: $aerr" if $aerr;
     return 0;
   }
-  my $set = eval { BSPreset::manifest_package_set($manifest) };
+  my $set = eval { Manifest::package_set($manifest) };
   return 0 if $@ || ref($set) ne 'HASH';
   my $manifest_clone = clone_url_for_repo($clone_url, $org, $name);
-  my $resolved = eval { BSPreset::resolve_package_set($set, $manifest_clone) };
+  my $resolved = eval { Manifest::resolve_package_set($set, $manifest_clone) };
   print "org package_set in $org/$name: $@" if $@;
   return 0 if $@ || !defined $resolved;
   return 0 unless $resolved->{'organisation'} eq $org;
   # only sets covering the branch of this event concern us here
   return 0 unless $resolved->{'branch'} eq $branch || $resolved->{'branch'} eq 'default';
-  my $projectname = BSPreset::branch_project_name($autosetup_prefix, $org, $name, $branch);
+  my $projectname = Manifest::branch_project_name($autosetup_prefix, $org, $name, $branch);
   # the _config belongs to the tree of the manifest which configures the project
   my $config = git_show($gitdir, $branch, '_config');
   eval {
-    setup_package_set_project($projectname, BSPreset::manifest_presets($manifest), undef, "$manifest_clone#$branch", $set, $config);
+    setup_package_set_project($projectname, Manifest::presets($manifest), undef, "$manifest_clone#$branch", $set, $config);
   };
   print "org package_set: failed to refresh $projectname: $@\n" if $@;
   return 1;
@@ -420,7 +420,7 @@ sub process_queue {
         rename($filepath, "$filepath.bad") or unlink($filepath);
         next;
       }
-      my $kind = BSPreset::gitea_event_kind($batch);
+      my $kind = Manifest::gitea_event_kind($batch);
       my $repository = ref($batch) eq 'HASH' ? $batch->{'repository'} : undef;
       my $fullname = ref($repository) eq 'HASH' ? $repository->{'full_name'} : undef;
       my $clone_url = ref($repository) eq 'HASH' ? $repository->{'clone_url'} : undef;
@@ -466,11 +466,11 @@ sub handle_push {
     my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
     my $manifest = git_show($gitdir, $branch, '_manifest');
     if (!defined $manifest) {
-      my $aerr = BSGit::repo_access_error($gitdir);
+      my $aerr = Gitea::repo_access_error($gitdir);
       print "Queue: $aerr" if $aerr;
     }
     if (defined $manifest) {
-      $own_set = eval { BSPreset::manifest_package_set($manifest) };
+      $own_set = eval { Manifest::package_set($manifest) };
       print "Queue: invalid package_set in $fullname#$branch: $@\n" if $@;
       my ($org, $repo) = split('/', $fullname, 2);
       if (!defined $org || !defined $repo) {
@@ -479,7 +479,7 @@ sub handle_push {
         my $scmsync = "$clone_url#$branch";
         my $config = git_show($gitdir, $branch, '_config');
         eval {
-          setup_project($manifest, BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch), $batch, $scmsync, $config);
+          setup_project($manifest, Manifest::branch_project_name($autosetup_prefix, $org, $repo, $branch), $batch, $scmsync, $config);
         };
         print "setup_project: failed: $@" if $@;
       }
@@ -525,7 +525,7 @@ sub handle_branch_delete {
   print "branch_delete: $org/$repo#$branch was deleted\n";
   orgset_cache_invalidate($org);
   my $failed;
-  my $projectname = BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch);
+  my $projectname = Manifest::branch_project_name($autosetup_prefix, $org, $repo, $branch);
   my (undef, $err) = get_project_meta($projectname);
   if ($err) {
     if ($err =~ /^404/) {
@@ -556,7 +556,7 @@ sub handle_repo_delete {
   print "repo_delete: $org/$repo was deleted\n";
   orgset_cache_invalidate($org);
   my $failed;
-  my ($projects, $err) = search_projects(BSPreset::repo_project_prefix($autosetup_prefix, $org, $repo));
+  my ($projects, $err) = search_projects(Manifest::repo_project_prefix($autosetup_prefix, $org, $repo));
   if (!defined $projects) {
     print "repo_delete: cannot list the OBS projects of $org/$repo: $err\n";
     return 0;
@@ -579,7 +579,7 @@ sub setup_branch_project {
   return 1 unless defined $manifest;
   my $scmsync = "$clone_url#$branch";
   eval {
-    setup_project($manifest, BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch), { 'ref' => "refs/heads/$branch", 'repository' => { 'full_name' => $fullname } }, $scmsync, git_show($gitdir, $branch, '_config'));
+    setup_project($manifest, Manifest::branch_project_name($autosetup_prefix, $org, $repo, $branch), { 'ref' => "refs/heads/$branch", 'repository' => { 'full_name' => $fullname } }, $scmsync, git_show($gitdir, $branch, '_config'));
   };
   if ($@) {
     print "rename: failed to set up $fullname#$branch: $@\n";
@@ -610,7 +610,7 @@ sub setup_branch_project {
 sub handle_repo_rename {
   my ($batch, $fullname, $clone_url) = @_;
   return 1 unless defined $autosetup_prefix;
-  my $old_fullname = BSPreset::event_old_fullname($batch);
+  my $old_fullname = Manifest::event_old_fullname($batch);
   if (!defined($old_fullname)) {
     print "repo_rename: cannot determine the old name of $fullname, keeping the OBS projects\n";
     return 1;
@@ -625,16 +625,16 @@ sub handle_repo_rename {
   orgset_cache_invalidate($old_org);
   orgset_cache_invalidate($org);
   my $failed;
-  my ($projects, $err) = search_projects(BSPreset::repo_project_prefix($autosetup_prefix, $old_org, $old_repo));
+  my ($projects, $err) = search_projects(Manifest::repo_project_prefix($autosetup_prefix, $old_org, $old_repo));
   if (!defined $projects) {
     print "repo_rename: cannot list the OBS projects of $old_org/$old_repo: $err\n";
     return 0;
   }
   delete_project($_) or $failed = 1 for @$projects;
   my $gitdir = "$gitea_root/gitea-repositories/" . lc($fullname) . ".git";
-  my $branches = BSGit::git_branches($gitdir);
+  my $branches = Gitea::git_branches($gitdir);
   if (!defined($branches)) {
-    my $aerr = BSGit::repo_access_error($gitdir) // "cannot read $gitdir";
+    my $aerr = Gitea::repo_access_error($gitdir) // "cannot read $gitdir";
     $aerr =~ s/\n$//;
     print "repo_rename: $aerr, no projects created for $fullname\n";
   } else {
@@ -656,7 +656,7 @@ sub handle_repo_rename {
 sub purge_org_packages {
   my ($org, $repo, $branch, $clone_url) = @_;
   return 1 unless defined $autosetup_prefix;
-  my $host = BSPreset::git_host($clone_url);
+  my $host = Manifest::git_host($clone_url);
   if (!defined $host) {
     print "purge: cannot determine the gitea host of $clone_url, keeping the organisation projects\n";
     return 1;
@@ -668,7 +668,7 @@ sub purge_org_packages {
     return 0;
   }
   # projects of the deleted repository itself get handled as a whole
-  my $own_prefix = BSPreset::repo_project_prefix($autosetup_prefix, $org, $repo);
+  my $own_prefix = Manifest::repo_project_prefix($autosetup_prefix, $org, $repo);
   my $failed;
   for my $projectname (grep { index($_, $own_prefix) != 0 } @$projects) {
     my ($names, $err) = get_project_packages($projectname);
@@ -681,7 +681,7 @@ sub purge_org_packages {
       my ($meta, $err) = get_package_meta($projectname, $packagename);
       next if $err;
       my $scmsync = ref($meta) eq 'HASH' ? $meta->{'scmsync'} : undef;
-      next unless BSPreset::scmsync_from_source($scmsync, $host, $org, $repo, $branch);
+      next unless Manifest::scmsync_from_source($scmsync, $host, $org, $repo, $branch);
       print "purge: deleting package $projectname/$packagename\n";
       delete_package($projectname, $packagename) or $failed = 1;
     }
@@ -691,12 +691,12 @@ sub purge_org_packages {
 
 sub setup_project {
   my ($manifest, $projectname, $batch, $scmsync, $config) = @_;
-  my $presets = eval { BSPreset::manifest_presets($manifest) };
+  my $presets = eval { Manifest::presets($manifest) };
   if ($@) {
     print "setup_project: $@";
     return;
   }
-  my $set = eval { BSPreset::manifest_package_set($manifest) };
+  my $set = eval { Manifest::package_set($manifest) };
   if ($@) {
     print "setup_project: $@";
     return;
@@ -725,7 +725,7 @@ sub setup_package_set_project {
   }
   my $clone_url = (ref($batch) eq 'HASH' && ref($batch->{'repository'}) eq 'HASH' && $batch->{'repository'}->{'clone_url'}) || $scmsync;
   $clone_url =~ s/\#.*$// if defined $clone_url;
-  my $resolved = eval { BSPreset::resolve_package_set($set, $clone_url) };
+  my $resolved = eval { Manifest::resolve_package_set($set, $clone_url) };
   if ($@) {
     print "setup_project: $@";
     return;
@@ -733,7 +733,7 @@ sub setup_package_set_project {
   # an organisation store we cannot read would look like an empty
   # organisation and wipe the package list, keep it untouched instead
   my $orgdir = "$gitea_root/gitea-repositories/" . lc($resolved->{'organisation'});
-  my $aerr = BSGit::dir_access_error($orgdir);
+  my $aerr = Gitea::dir_access_error($orgdir);
   if ($aerr) {
     print "setup_project: $aerr, keeping packages of $projectname untouched\n";
     return;
@@ -746,8 +746,8 @@ sub setup_package_set_project {
   # without a project level scmsync only the bridge can put the _config file
   # of the manifest branch in front of the build server
   sync_project_config($projectname, $config);
-  my $members = BSGit::org_repo_members($gitea_root, $resolved->{'organisation'}, $resolved->{'branch'});
-  $members = BSPreset::select_members($members, $resolved);
+  my $members = Gitea::org_repo_members($gitea_root, $resolved->{'organisation'}, $resolved->{'branch'});
+  $members = Manifest::select_members($members, $resolved);
   print "setup_project: organisation $resolved->{'organisation'} has " . (0 + @$members) . " package_set members for $projectname\n";
   reconcile_package_set($projectname, $resolved, $members, $clone_url);
 }
@@ -758,7 +758,7 @@ sub setup_package_set_project {
 # derived from repository events, never act on a name failing this check.
 sub project_in_scope {
   my ($projectname) = @_;
-  return BSPreset::project_name_in_scope($autosetup_prefix, $projectname);
+  return Manifest::project_name_in_scope($autosetup_prefix, $projectname);
 }
 
 # Delete a project with all its packages from OBS. Deleting the project meta
@@ -795,7 +795,7 @@ sub delete_project {
 # Remove a package with all its content from OBS.
 sub delete_package {
   my ($projectname, $packagename) = @_;
-  unless (project_in_scope($projectname) && package_name_in_scope($packagename)) {
+  unless (project_in_scope($projectname) && Manifest::package_name_in_scope($packagename)) {
     print "delete_package: refusing to delete $projectname/$packagename, not a project below the $autosetup_prefix prefix or an unsafe name\n";
     return 0;
   }
@@ -815,32 +815,28 @@ sub delete_package {
 }
 
 # List the names of all OBS projects whose name starts with $prefix, using the
-# project search with an attribute prefix match. Returns an arrayref of names
+# id project search with an attribute prefix match. The search answers with a
+# collection of project names, serialised by the OBS backend with the very same
+# $BSXML::collection template we parse it with. Returns an arrayref of names
 # or (undef, error).
 sub search_projects {
   my ($prefix) = @_;
   my $match = "starts-with(\@name,'$prefix')";
   $match =~ s/([^A-Za-z0-9_.~-])/sprintf('%%%02X', ord($1))/ge;
   my @hdrs = defined $api_auth ? ($api_auth) : ();
-  my $body;
+  my $collection;
   eval {
-    $body = BSRPC::rpc({ 'uri' => "$source_url/search/project?match=$match",
-    		  	   'request' => 'GET',
-    		  	   'headers' => \@hdrs,
-    		  	   'verbatim_uri' => 1,
-    		  	   'timeout' => 30 }, undef);
+    $collection = BSRPC::rpc({ 'uri' => "$source_url/search/project/id?match=$match",
+		  	   'request' => 'GET',
+		  	   'headers' => \@hdrs,
+		  	   'verbatim_uri' => 1,
+		  	   'timeout' => 30 }, $BSXML::collection);
   };
   return (undef, $@) if $@;
   my @names;
-  while (($body || '') =~ m{<project\b[^>]*\bname="([^"]*)"}g) {
-    my $name = $1;
-    $name =~ s/&lt;/</g;
-    $name =~ s/&gt;/>/g;
-    $name =~ s/&quot;/"/g;
-    $name =~ s/&#39;/'/g;
-    $name =~ s/&#(\d+);/chr($1)/ge;
-    $name =~ s/&#x([0-9a-fA-F]+);/chr(hex($1))/ge;
-    $name =~ s/&amp;/&/g;
+  for my $hit (@{$collection->{'project'} || []}) {
+    next unless ref($hit) eq 'HASH' && defined $hit->{'name'};
+    my $name = $hit->{'name'};
     # only touch projects which really are ours, whatever the search returns
     push @names, $name if index($name, $prefix) == 0;
   }
@@ -858,10 +854,10 @@ sub project_xml {
   my $extrapaths = parent_project_paths($projectname, $presets, $batch);
   my $changed = fork_changed_package_sources($manifest, $batch);
   if ($changed && @$changed) {
-    $scmsync = BSPreset::scmsync_with_onlybuild($scmsync, $changed);
+    $scmsync = Manifest::scmsync_with_onlybuild($scmsync, $changed);
     print "project_xml: building $projectname only for changed packages: @$changed\n";
   }
-  my $xml = eval { BSPreset::preset_xml($projectname, $presets, $extrapaths, $scmsync) };
+  my $xml = eval { Manifest::preset_xml($projectname, $presets, $extrapaths, $scmsync) };
   die("cannot build project xml for $projectname: $@\n") if $@;
   return $xml;
 }
@@ -974,7 +970,7 @@ sub get_project_meta {
 # Read the package meta of $packagename in $projectname from the OBS api.
 sub get_package_meta {
   my ($projectname, $packagename) = @_;
-  return (undef, "refused: $projectname/$packagename is not a project below the $autosetup_prefix prefix\n") unless project_in_scope($projectname) && package_name_in_scope($packagename);
+  return (undef, "refused: $projectname/$packagename is not a project below the $autosetup_prefix prefix\n") unless project_in_scope($projectname) && Manifest::package_name_in_scope($packagename);
   my @hdrs = defined $api_auth ? ($api_auth) : ();
   my $meta;
   eval {
@@ -1018,8 +1014,8 @@ sub reconcile_package_set {
 
   my %desired;
   for my $member (@{ $members || [] }) {
-    my $packagename = BSPreset::sanitize_package_name($member->{'name'});
-    my $scmsync = BSPreset::scmsync_url_for($clone_url, $org, $member->{'name'}, $member->{'branch'});
+    my $packagename = Manifest::sanitize_package_name($member->{'name'});
+    my $scmsync = Manifest::scmsync_url_for($clone_url, $org, $member->{'name'}, $member->{'branch'});
     if (!defined $packagename || !defined $scmsync || !length $packagename) {
       print "reconcile_package_set: cannot handle member $member->{'name'}\n";
       next;
@@ -1035,7 +1031,7 @@ sub reconcile_package_set {
     my $scmsync = $desired{$packagename};
     my ($meta, $err) = get_package_meta($projectname, $packagename);
     next unless $err || ref($meta) ne 'HASH' || !defined $meta->{'scmsync'} || $meta->{'scmsync'} ne $scmsync;
-    my $xml = BSPreset::package_meta_xml($projectname, $packagename, $scmsync);
+    my $xml = Manifest::package_meta_xml($projectname, $packagename, $scmsync);
     my @hdrs = ('Content-Type: text/xml');
     push @hdrs, $api_auth if defined $api_auth;
     eval {
@@ -1089,13 +1085,13 @@ sub parent_project_paths {
   # branch is used unless the synthetic --parent batch specifies one.
   my $parent_branch = parent_branch_of($batch);
   $parent_branch = $branch unless defined $parent_branch;
-  my $parent_project = BSPreset::branch_project_name($autosetup_prefix, $p_org, $p_repo, $parent_branch);
+  my $parent_project = Manifest::branch_project_name($autosetup_prefix, $p_org, $p_repo, $parent_branch);
   my ($pmeta, $err) = get_project_meta($parent_project);
   if ($err) {
     print "parent_project_paths: upstream project $parent_project not found, building $projectname without extra paths: $err";
     return undef;
   }
-  my $extrapaths = BSPreset::extrapaths_from_parent_meta($projectname, $presets, $pmeta, $parent_project);
+  my $extrapaths = Manifest::extrapaths_from_parent_meta($projectname, $presets, $pmeta, $parent_project);
   if ($extrapaths) {
     print "parent_project_paths: building $projectname against upstream project $parent_project\n";
   }
@@ -1142,7 +1138,7 @@ sub resolve_project_spec {
   my $manifest = git_show($gitdir, $branch, '_manifest');
   unless (defined $manifest) {
     my $msg = "cannot read _manifest from $giturl#$branch (git dir $gitdir";
-    my $aerr = BSGit::repo_access_error($gitdir);
+    my $aerr = Gitea::repo_access_error($gitdir);
     if ($aerr) {
       $aerr =~ s/\n$//;
       $msg .= ": $aerr";
@@ -1179,7 +1175,7 @@ sub resolve_project_spec {
 
   my ($org, $repo) = split('/', $fullname, 2);
   die("cannot determine org/repo from $fullname\n") unless defined $org && defined $repo;
-  return (BSPreset::branch_project_name($autosetup_prefix, $org, $repo, $branch), $manifest, "$giturl#$branch", $batch, $gitdir, $branch);
+  return (Manifest::branch_project_name($autosetup_prefix, $org, $repo, $branch), $manifest, "$giturl#$branch", $batch, $gitdir, $branch);
 }
 
 # Set up a single project for a given git branch, given as "GIT_URL#BRANCH".
@@ -1199,22 +1195,22 @@ sub setup_single_project {
 sub show_single_project {
   my ($spec, $parent) = @_;
   my ($projectname, $manifest, $scmsync, $batch) = resolve_project_spec($spec, $parent);
-  my $presets = eval { BSPreset::manifest_presets($manifest) };
+  my $presets = eval { Manifest::presets($manifest) };
   die("cannot parse _manifest: $@") if $@;
-  my $set = eval { BSPreset::manifest_package_set($manifest) };
+  my $set = eval { Manifest::package_set($manifest) };
   die("cannot parse _manifest: $@") if $@;
   if ($set) {
     my $clone_url = $scmsync;
     $clone_url =~ s/\#.*$//;
-    my $resolved = eval { BSPreset::resolve_package_set($set, $clone_url) };
+    my $resolved = eval { Manifest::resolve_package_set($set, $clone_url) };
     die("cannot resolve package_set: $@") if $@;
-    print BSPreset::preset_xml($projectname, $presets) if $presets && @$presets;
-    my $members = BSGit::org_repo_members($gitea_root, $resolved->{'organisation'}, $resolved->{'branch'});
-    $members = BSPreset::select_members($members, $resolved);
+    print Manifest::preset_xml($projectname, $presets) if $presets && @$presets;
+    my $members = Gitea::org_repo_members($gitea_root, $resolved->{'organisation'}, $resolved->{'branch'});
+    $members = Manifest::select_members($members, $resolved);
     print "package_set organisation $resolved->{'organisation'} branch $resolved->{'branch'}:\n";
     for my $member (@$members) {
-      my $url = BSPreset::scmsync_url_for($clone_url, $resolved->{'organisation'}, $member->{'name'}, $member->{'branch'});
-      printf("  %s -> %s\n", BSPreset::sanitize_package_name($member->{'name'}), $url);
+      my $url = Manifest::scmsync_url_for($clone_url, $resolved->{'organisation'}, $member->{'name'}, $member->{'branch'});
+      printf("  %s -> %s\n", Manifest::sanitize_package_name($member->{'name'}), $url);
     }
     return;
   }
@@ -1233,10 +1229,10 @@ sub repositoryevent {
   my $hevent = BSServer::header('x-gitea-event');
   my $batch = eval { JSON::XS::decode_json($batch_json) };
   # log every incoming event before anything else may abort the handling
-  print BSPreset::event_logline($batch, $hevent);
+  print Manifest::event_logline($batch, $hevent);
   die("no event data given\n") unless ref($batch) eq 'HASH';
   $batch->{'event'} = $hevent if defined($hevent) && !defined($batch->{'event'});
-  my $kind = BSPreset::gitea_event_kind($batch);
+  my $kind = Manifest::gitea_event_kind($batch);
   # events which do not concern us are acknowledged without being queued
   if (!defined($kind)) {
     return (JSON::XS::encode_json({ answer => 'ignored' }), 'Content-Type: application/json');

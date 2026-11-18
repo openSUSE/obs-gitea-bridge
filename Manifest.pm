@@ -15,7 +15,7 @@
 # Convert a bridge _manifest into a buildservice project definition.
 #
 
-package BSPreset;
+package Manifest;
 
 use strict;
 
@@ -23,12 +23,8 @@ use YAML::XS ();
 use XML::Structured;
 use BSXML;
 
-use Exporter;
-our @ISA = qw(Exporter);
-our @EXPORT = qw(manifest_presets preset_data preset_xml manifest_package_set resolve_package_set select_members sanitize_package_name scmsync_url_for package_meta_xml normalize_gitprefix gitea_event_kind event_old_fullname event_logline branch_project_name repo_project_prefix sanitize_project_part project_name_in_scope package_name_in_scope git_host scmsync_from_source);
-
 # Prefix stripped from repo URLs to derive the OBS path project/repository.
-# Made configurable via config.pm ($BSPreset::gitprefix).
+# Made configurable via config.pm ($Manifest::gitprefix).
 our $gitprefix = 'https://download.opensuse.org/repositories/';
 
 # Normalize the download url prefix which gets stripped from repository urls
@@ -46,7 +42,7 @@ sub normalize_gitprefix {
 # Parse a _manifest yaml string and return the presets list.
 # Returns undef when the manifest is not a hash or does not contain
 # a presets list (in which case the project should be deleted).
-sub manifest_presets {
+sub presets {
   my ($manifest) = @_;
   my $data = eval { YAML::XS::Load($manifest) };
   die("cannot parse _manifest: $@\n") if $@;
@@ -57,7 +53,7 @@ sub manifest_presets {
 
 # Return the subdirectories array from a _manifest string, or undef when the
 # manifest does not define any (package sources then live at the top level).
-sub manifest_subdirectories {
+sub subdirectories {
   my ($manifest) = @_;
   my $data = eval { YAML::XS::Load($manifest) };
   die("cannot parse _manifest: $@\n") if $@;
@@ -70,7 +66,7 @@ sub manifest_subdirectories {
 # undef when the manifest does not define one. The section declares all
 # repositories of a Gitea organisation with a given branch as build packages.
 # Dies when the section has an invalid shape or names no branch.
-sub manifest_package_set {
+sub package_set {
   my ($manifest) = @_;
   my $data = eval { YAML::XS::Load($manifest) };
   die("cannot parse _manifest: $@\n") if $@;
@@ -139,7 +135,7 @@ sub resolve_package_set {
 }
 
 # Filter the candidate members (arrayref of {name, branch} hashrefs as
-# returned by BSGit::org_repo_members) through the exclude list of a resolved
+# returned by Gitea::org_repo_members) through the exclude list of a resolved
 # package_set. The repository whose _manifest declares the set is never a
 # member: it configures the project and is not one of its packages. Returns a
 # sorted arrayref.
