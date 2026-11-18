@@ -20,7 +20,7 @@ package Manifest;
 use strict;
 
 use YAML::XS ();
-use XML::Structured;
+use BSUtil;
 use BSXML;
 
 # Prefix stripped from repo URLs to derive the OBS path project/repository.
@@ -183,7 +183,7 @@ sub scmsync_url_for {
 # package level scmsync url.
 sub package_meta_xml {
   my ($projectname, $packagename, $scmsync) = @_;
-  return XMLout($BSXML::pack, { 'name' => $packagename, 'project' => $projectname, 'scmsync' => $scmsync });
+  return BSUtil::toxml({ 'name' => $packagename, 'project' => $projectname, 'scmsync' => $scmsync }, $BSXML::pack);
 }
 
 # Compute the list of package source directories. $subdirectories is the
@@ -307,7 +307,7 @@ sub preset_data {
 # Serialize a list of presets into a project xml string.
 sub preset_xml {
   my ($projectname, $presets, $extrapaths, $scmsync) = @_;
-  return XMLout($BSXML::proj, preset_data($projectname, $presets, $extrapaths, $scmsync));
+  return BSUtil::toxml(preset_data($projectname, $presets, $extrapaths, $scmsync), $BSXML::proj);
 }
 
 # Compute the path entries that replicate the upstream project's repository
