@@ -38,6 +38,7 @@ use Data::Dumper;
 use Fcntl ':flock';
 use JSON::XS ();
 use MIME::Base64 ();
+use POSIX ();
 
 use BSServer;
 use BSRPC ':https';
@@ -47,6 +48,10 @@ use Manifest;
 use Gitea;
 
 use strict;
+
+# the server logs line by line (journald) and not every child exits through
+# perl's exit, so the output must not sit in the stdio buffers
+$| = 1;
 
 my $port = 9998;
 my $proto = 'http';
@@ -64,6 +69,9 @@ my @org_scan_exclude = ('pool');
 # seconds a manifest discovery result is trusted before the organisation is
 # scanned again as a backstop for missed events
 my $orgset_scan_ttl = 3600;
+# seconds between retries of a queue backlog that could not be delivered to
+# OBS, so an outage does not need a new event or a restart to be worked off
+my $queue_retry_interval = 60;
 eval {
   use config;
   $header = "X-SCM-BRIDGE-COOKIE: $config::shared_cookie" if $config::shared_cookie;
@@ -76,6 +84,7 @@ eval {
   $api_password = $config::api_password if defined $config::api_password;
   @org_scan_exclude = @config::org_scan_exclude if @config::org_scan_exclude;
   $orgset_scan_ttl = $config::orgset_scan_ttl if $config::orgset_scan_ttl;
+  $queue_retry_interval = $config::queue_retry_interval if $config::queue_retry_interval;
 };
 
 # OBS api base url without a trailing /public marker, used for the
@@ -395,7 +404,8 @@ sub queue_files {
 # the working process and returns. That process re-checks the queue until it
 # stays empty while holding the lock, so handed over events are picked up
 # there before the lock goes away. A failed event aborts the run and stays in
-# the queue for a retry by a later event delivery or a service restart.
+# the queue; the periodic retry timer re-runs the queue until OBS accepts it
+# again, so a backlog survives an outage without new events or a restart.
 sub process_queue {
   return unless -d $queue_dir;
   my $lockpath = "$queue_dir/.queue.lock";
@@ -451,6 +461,36 @@ sub process_queue {
     close($lock_fh);
     # events written while we were working are processed in the next round
   }
+}
+
+# Server loop retry timer: a queue backlog left behind by an OBS outage must
+# get delivered once OBS is reachable again, even when no new event arrives
+# to trigger the processing. The run happens in a short lived child, a
+# failing rpc would otherwise block the accepting server for its timeout; the
+# server loop reaps it like a request child. The non-blocking queue lock
+# keeps concurrent workers out of each other's way, so a drainer started
+# while another process already works the queue exits right away.
+my $queue_drainer;
+sub queue_retry_timer {
+  if (defined $queue_drainer) {
+    # the server loop's own reap loop may already have taken the child away,
+    # a waitpid with ECHILD reports the drain as finished as well
+    undef $queue_drainer if waitpid($queue_drainer, POSIX::WNOHANG) != 0;
+    return if defined $queue_drainer;
+  }
+  my @files = queue_files();
+  return unless @files;
+  my $pid = fork();
+  if (!defined($pid)) {
+    print "Queue: cannot fork the retry process: $!\n";
+    return;
+  }
+  if ($pid == 0) {
+    process_queue();
+    POSIX::_exit(0);
+  }
+  print "Queue: retrying the " . scalar(@files) . " pending events\n";
+  $queue_drainer = $pid;
 }
 
 # Handle a push event: create or update the OBS project of the pushed branch
@@ -1293,6 +1333,8 @@ my $conf = {
   'errorreply' => \&errorreply,
   'setkeepalive' => 1,
   'maxchild' => 20,
+  'periodic' => \&queue_retry_timer,
+  'periodic_interval' => $queue_retry_interval,
 };
 
 # single-shot mode: setup or show a single project for a given git branch,

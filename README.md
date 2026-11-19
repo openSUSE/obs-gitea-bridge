@@ -42,6 +42,16 @@ their packages by a delete on the project source.
 Renaming a branch is not handled yet, the OBS project of the old branch name
 stays around and must be removed manually.
 
+Queue and retries
+=================
+
+Every delivered event is first written to the queue directory and then
+processed in the order of arrival. When OBS cannot be reached, the failing
+event stays at the head of the queue and the bridge retries the backlog
+every queue_retry_interval seconds (60 by default). A backlog created by
+a network outage is therefore delivered automatically once OBS is
+reachable again, no new event and no service restart required.
+
 Permissions
 ===========
 

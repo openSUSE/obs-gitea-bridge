@@ -22,6 +22,12 @@ our $obsurl        = 'http://localhost:5352';
 # We queue events local to avoid losses when source server is not reachable
 # our $queue_dir     = '/srv/obs-gitea-bridge/queue';
 
+# Seconds between retries of a queue backlog that OBS could not accept
+# (default 60). The timer delivers the events of a network outage
+# automatically once OBS is reachable again, without requiring a new
+# webhook event or a service restart.
+# our $queue_retry_interval = 60;
+
 # We run on the gitea server itself, so repositories can be read directly
 # from the git object store for the _manifest lookup.
 our $gitea_root    = '/var/lib/gitea/data';

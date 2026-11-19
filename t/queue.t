@@ -4,8 +4,10 @@
 # delivered concurrently to several preforked server children must each be
 # processed exactly once, with unique queue file names, and events that arrive
 # while another process holds the queue lock must be picked up by that process
-# instead of being processed a second time. A fake OBS api on localhost stands
-# in for the real server.
+# instead of being processed a second time. A queue backlog that OBS could not
+# accept must be delivered by the retry timer once OBS is healthy again,
+# without a service restart. A fake OBS api on localhost stands in for the
+# real server.
 #
 use strict;
 use File::Basename qw(dirname);
@@ -26,6 +28,11 @@ my $srcdir = File::Spec->rel2abs(File::Spec->catdir(dirname(__FILE__), '..'));
 # isolated copy of the bridge with its own config, so a config.pm of the
 # developer or the packaged installation never takes part in the test
 my $testdir = tempdir('obs-gitea-bridge-test-XXXXXX', TMPDIR => 1, CLEANUP => 1);
+
+# while this flag file exists, the fake OBS answers the scmsync triggers with
+# an error to simulate an unreachable server
+my $obs_fail_flag = File::Spec->catfile($testdir, 'obs-outage');
+
 for my $f (grep { !m{/config\.pm$} } glob("$srcdir/*.pm"), "$srcdir/gitea_obs_bridge") {
   my $base = (File::Spec->splitpath($f))[2];
   copy($f, File::Spec->catfile($testdir, $base)) or die "cannot copy $f: $!";
@@ -54,7 +61,8 @@ sub read_log {
 }
 
 # a minimal OBS api: GET /configuration answers immediately, POST /source
-# sleeps $delay seconds to simulate a long running scmsync trigger
+# sleeps $delay seconds to simulate a long running scmsync trigger and
+# answers an error while the outage flag file exists
 sub start_fake_obs {
   my ($port, $delay) = @_;
   my $sock = IO::Socket::INET->new(LocalAddr => '127.0.0.1', LocalPort => $port,
@@ -88,7 +96,11 @@ sub start_fake_obs {
           $status = '200 OK';
         } elsif (defined $req && $req =~ m{^POST \S*/source}) {
           Time::HiRes::sleep($delay) if $delay;
-          ($status, $body) = ('200 OK', "ok\n");
+          if (-e $obs_fail_flag) {
+            ($status, $body) = ('503 Service Unavailable', "simulated outage\n");
+          } else {
+            ($status, $body) = ('200 OK', "ok\n");
+          }
         }
         print $conn "HTTP/1.0 $status\r\nContent-Type: text/xml\r\n"
                   . "Content-Length: " . length($body) . "\r\nConnection: close\r\n\r\n$body";
@@ -106,7 +118,7 @@ sub start_fake_obs {
 # (re)start fake OBS and the bridge, wait until the bridge answers requests
 my ($bridge_port, $obs_port, $queue_dir);
 sub start_bridge {
-  my ($source_delay, $logfile) = @_;
+  my ($source_delay, $logfile, $retry_interval) = @_;
   $bridge_port ||= free_port();
   $obs_port = free_port();
   $queue_dir ||= File::Spec->catdir($testdir, 'queue');
@@ -117,6 +129,7 @@ sub start_bridge {
            . "our \$obsurl = 'http://127.0.0.1:$obs_port/public';\n"
            . "our \$queue_dir = '$queue_dir';\n"
            . "our \$gitea_root = '" . File::Spec->catdir($testdir, 'gitea') . "';\n"
+           . (defined $retry_interval ? "our \$queue_retry_interval = $retry_interval;\n" : '')
            . "1;\n";
   close($cfg);
   push @children, [start_fake_obs($obs_port, $source_delay)];
@@ -261,5 +274,27 @@ is(scalar(keys %seen), 4, 'no event of the hand over run is processed twice');
 unlike($log, qr/failed to delete/, 'the hand over run deletes each queue file once');
 like($log, qr/another process is working the queue/, 'busy children hand their events over');
 is(scalar(pending_queue_files()), 0, 'the queue is empty after the hand over');
+
+# --- test: a backlog left by an OBS outage is retried without a restart ---
+my $logfile3 = File::Spec->catfile($testdir, 'bridge3.log');
+stop_bridge();
+ok(start_bridge(0, $logfile3, 2), 'bridge with a queue retry interval answers requests');
+
+# simulate the outage: the fake api refuses the scmsync triggers
+open(my $flag, '>', $obs_fail_flag) or die "cannot create $obs_fail_flag: $!";
+close($flag);
+$results = post_events(o1 => push_event('outage1'));
+is($results->{'o1'}, 'ok', 'an event is acknowledged while OBS is down');
+Time::HiRes::sleep(0.5);
+like(read_log($logfile3), qr/keeping it for a later retry/, 'the undeliverable event stays in the queue');
+is(scalar(pending_queue_files()), 1, 'the queue holds the pending event');
+
+# the network is restored: no restart, the retry timer has to deliver the
+# backlog now that no new event will ever trigger the processing
+unlink($obs_fail_flag) or die "cannot remove $obs_fail_flag: $!";
+$log = wait_processed($logfile3, 1);
+like($log, qr/^Processed: push event for \S+outage1\.git/m, 'the queued event is retried without a restart');
+like($log, qr/^Queue: retrying the \d+ pending events/m, 'the retry timer reports the retry');
+is(scalar(pending_queue_files()), 0, 'the queue drains after the recovery');
 
 done_testing();
