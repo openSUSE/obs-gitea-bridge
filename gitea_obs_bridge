@@ -214,9 +214,9 @@ sub fork_changed_package_sources {
   my %hashes;
   my %parent_hashes;
   for my $dir (@$dirs) {
-    my $out = git_capture('--git-dir=' . $gitdir, 'rev-parse', "$branch:$dir");
+    my $out = git_capture($gitdir, 'rev-parse', "$branch:$dir");
     $hashes{$dir} = $out->[0] if $out && defined $out->[0];
-    my $pout = git_capture('--git-dir=' . $parent_gitdir, 'rev-parse', "$parent_branch:$dir");
+    my $pout = git_capture($parent_gitdir, 'rev-parse', "$parent_branch:$dir");
     $parent_hashes{$dir} = $pout->[0] if $pout && defined $pout->[0];
   }
   return [ sort @{ Manifest::changed_package_sources($dirs, \%hashes, \%parent_hashes) } ];

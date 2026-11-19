@@ -52,17 +52,19 @@ sub git_show {
   return $data;
 }
 
-# Run a git command and return its standard output as an arrayref of lines,
-# or undef on failure (git's error output is suppressed).
+# Run a git command on the given git directory and return its standard
+# output as an arrayref of lines, or undef on failure (git's error output is
+# suppressed). The --git-dir argument is always added as git's first
+# argument, so the command never depends on the current directory.
 sub git_capture {
-  my (@args) = @_;
+  my ($gitdir, @args) = @_;
   my $pid = open(my $fh, '-|');
   if (!defined $pid) {
     die("cannot fork: $!\n");
   }
   if ($pid == 0) {
     open(STDERR, '>', '/dev/null');
-    exec('git', @args);
+    exec('git', "--git-dir=$gitdir", @args);
     exit 255;
   }
   my @lines = <$fh>;
@@ -134,7 +136,7 @@ sub git_ref_exists {
 sub git_branches {
   my ($gitdir) = @_;
   return undef unless defined $gitdir && length $gitdir;
-  my $lines = git_capture('--git-dir=' . $gitdir, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/');
+  my $lines = git_capture($gitdir, 'for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/');
   return undef unless defined $lines;
   return [ grep { length $_ } @$lines ];
 }
@@ -147,7 +149,7 @@ sub git_branches {
 sub git_lstree_sources {
   my ($gitdir, $tree) = @_;
   return undef unless defined $gitdir && defined $tree;
-  my $out = git_capture('--git-dir=' . $gitdir, 'ls-tree', "$tree");
+  my $out = git_capture($gitdir, 'ls-tree', "$tree");
   my @sources;
   if ($out) {
     for my $line (@$out) {
