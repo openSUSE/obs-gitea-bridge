@@ -191,12 +191,15 @@ our $packinfo = [
 	  [ 'buildtimeservice' ],
 	  [ 'onlynative' ],
 	  [ 'alsonative' ],
+	  [ 'constraint' ],
 	  [ 'imagetype' ],	# kiwi
 	  [ 'imagearch' ],	# kiwi
 	    'nodbgpkgs',	# kiwi
 	    'nosrcpkgs',	# kiwi
 	    'nativebuild',	# cross build: native
+	    'nouseforbuild',
 	    'hasbuildenv',
+	    'bcntsynctag',
 	 [[ 'path' =>
 		'project',
 		'repository',
@@ -223,12 +226,17 @@ our $linked = [
 
 our $aggregatelist = [
     'aggregatelist' =>
+      'resign',
      [[ 'aggregate' =>
 	    'project',
+	    'arch',
+	    'sourcearch',
 	    [],
             'nosources',
+            'noupdateinfo',
 	  [ 'package' ],
 	  [ 'binary' ],
+	  [ 'binaryarch' ],
 	 [[ 'repository' =>
 		'target',
 		'source',
@@ -266,6 +274,9 @@ our $patchinfo = [
             'packager',
             'retracted',
             'stopped',
+            'seperate_build_arch', # for builds on each scheduler arch
+	    'blocked_in_product',
+	    'embargo_date',
             'zypp_restart_needed',
             'reboot_needed',
             'relogin_needed',
@@ -299,6 +310,7 @@ our $channel = [
 		'package',
 		'arch',
 		'supportstatus',
+		'superseded_by',
 	 ]],
      ]],
 ];
@@ -314,9 +326,15 @@ our $modulemd = [
 	[],
 	'macros',
      [[ 'dependencies' =>
-	    [ 'buildrequires' ],
-	    [ 'requires' ],
+	  [ 'buildrequires' ],
+	  [ 'requires' ],
      ]],
+];
+
+our $projectlink = [
+    'link' =>
+	'project',
+	'vrevmode',
 ];
 
 our $projpack = [
@@ -331,12 +349,11 @@ our $projpack = [
 	    'description',
 	    'config',
 	    'patternmd5',
-	 [[ 'link' =>
-		'project',
-		'vrevmode',
-	 ]],
+	  [ $projectlink ],
 	    'remoteurl',
 	    'remoteproject',
+	    'scmsync',
+	    'scminfo',
 	    @flags,
 	    @roles,
 	  [ $repo ],
@@ -347,12 +364,14 @@ our $projpack = [
 		'srcmd5',	# commit id
 		'versrel',
 		'verifymd5',	# tree id
+		'scmsync',
+		'scminfo',
 		'originproject',
 		'revtime',
 		'constraintsmd5',	# md5sum of constraints file in srcmd5
-		[ $linked ],
+	      [ $linked ],
 		'error',
-		[ $packinfo ],
+	      [ $packinfo ],
 		$aggregatelist,
 		$patchinfo,
 		'channelmd5',
@@ -360,8 +379,10 @@ our $projpack = [
 		@flags,
 		'bcntsynctag',
 		'hasbuildenv',
+		'hasbigdep',
 	 ]],
 	    'missingpackages',
+	    'remoteaccessdenied',
      ]],
      [[ 'remotemap' =>
 	    'project',
@@ -373,6 +394,7 @@ our $projpack = [
 	    'partition',
 	    'proto',	# project data not included
 	     [],
+	  [ $projectlink ],
 	    'config',
 	    @flags,
 	    @roles,
@@ -465,6 +487,7 @@ our $fileinfo = [
 	'source',
 	'summary',
 	'description',
+	'disturl',
 	'size',
 	'mtime',
       [ 'provides' ],
@@ -476,6 +499,7 @@ our $fileinfo = [
       [ 'supplements' ],
       [ 'suggests' ],
       [ 'enhances' ],
+      [ 'filelist' ],
 
      [[ 'provides_ext' =>
 	    'dep',
@@ -555,11 +579,13 @@ our $buildinfo = [
 	'srcmd5',
 	'verifymd5',
 	'rev',
+	'vcs',
 	'disturl',
 	'reason',       # just for the explain string of a build reason
 	'needed',       # number of blocked
 	'revtime',	# time of last commit
 	'readytime',
+	'buildtime',	# for reproducible builds
 	'specfile',	# obsolete
 	'file',
 	'versrel',
@@ -570,6 +596,7 @@ our $buildinfo = [
 	'ccache',
 	'constraintsmd5',
       [ 'prjconfconstraint' ],
+      [ 'constraint' ],	# recipe constraint
       [ 'subpack' ],
       [ 'imagetype' ],	# kiwi
 	'nodbgpkgs',	# kiwi
@@ -579,6 +606,7 @@ our $buildinfo = [
 	'logidlelimit',	# internal
 	'logsizelimit',	# internal
 	'genbuildreqs',	# internal
+	'nouseforbuild',	# internal
       [ 'obsgendiff' =>
 	    'project',
 	    'repository',
@@ -631,7 +659,8 @@ our $buildinfo = [
      ]],
 	'containerannotation',	# temporary hack
 	'expanddebug',
-	'followupfile',	# for two-stage builds
+	'followupfile',	# for multi-stage builds
+	'followupsteps',# for multi-stage builds, to avoid loops
 	'masterdispatched',	# dispatched through a master dispatcher
 	'nounchanged',	# do not check for "unchanged" builds
       [ 'module' ],	# list of modules to use
@@ -647,6 +676,11 @@ our $buildinfo = [
 	'slsaprovenance',	# internal
 	'slsadownloadurl',	# internal
 	'slsabuilder',   	# internal
+
+	'signflavor',   	# internal
+
+	'reprorepoid',   	# internal
+	'reprojobid',   	# internal
 
       [ 'preinstallimage' =>
 	    'project',
@@ -682,14 +716,14 @@ our $jobstatus = [
 
 our $buildreason = [
     'reason' =>
-       [],
-       'explain',             # Readable reason
-       'time',                # unix time from start build
-       'oldsource',           # last build source md5 sum, if a source change was the reason
-       [[ 'packagechange' =>  # list changed files which are used for building
-          'change',           # kind of change (content/meta change, additional file or removed file)
-          'key',              # file name
-       ]],
+	[],
+	'explain',             # Readable reason
+	'time',                # unix time from start build
+	'oldsource',           # last build source md5 sum, if a source change was the reason
+     [[ 'packagechange' =>     # list changed files which are used for building
+	    'change',          # kind of change (content/meta change, additional file or removed file)
+	    'key',             # file name
+     ]],
 ];
 
 our $buildstatus = [
@@ -699,7 +733,8 @@ our $buildstatus = [
 	'status',	# obsolete, now code
 	'error',	# obsolete, now details
 	'dirty',	# marked for re-scheduling
-	'versrel',	# for withversrel result call
+	'versrel',	# for versrel result call
+	'reproduciblecheck',	# for reproduciblecheck result call
 	[],
 	'details',
 
@@ -752,10 +787,11 @@ our $event = [
 	'projectservicesmd5',	# for type=servicedispatch
 	'oldsrcmd5',		# for type=servicedispatch
 	'details',              # for type=dispatchdetails
-        [[ 'included' =>        # for type=sourcepublish (optional)
-             'project',
-             'package',
-             'srcmd5' ]]
+     [[ 'included' =>           # for type=sourcepublish (optional)
+	     'project',
+	     'package',
+	     'srcmd5',
+     ]],
 ];
 
 our $events = [
@@ -817,11 +853,15 @@ our $binaryversionlist = [
 	    'hdrmd5',
 	    'metamd5',
 	    'leadsigmd5',
+	    'md5sum',	# worker call only
+	    'evr',
+	    'arch',
      ]],
 ];
 
 our $packagebinaryversionlist = [
     'packagebinaryversionlist' =>
+	'cookie',
      [[ 'binaryversionlist' =>
 	    'package',
 	    'code',
@@ -832,6 +872,9 @@ our $packagebinaryversionlist = [
 		'hdrmd5',
 		'metamd5',
 		'leadsigmd5',
+		'md5sum',	# worker call only
+		'evr',
+		'arch',
 	 ]],
      ]],
 ];
@@ -847,8 +890,9 @@ our $packagebinarychecksums = [
 our $worker = [
     'worker' =>
 	'hostarch',
-	'ip',
-	'port',
+	'ip',		# obsolete
+	'port',		# obsolete
+	'uri',
 	'registerserver',
 	'workerid',
       [ 'buildarch' ],
@@ -860,9 +904,9 @@ our $worker = [
         'flavor'
       ],
       [ 'hardware' =>
-        [ 'cpu' =>
-          [ 'flag' ],
-        ],
+          [ 'cpu' =>
+	      [ 'flag' ],
+          ],
         'processors',
         'jobs',
         'nativeonly',   # don't allow usage via the helper script
@@ -1034,11 +1078,14 @@ our $ajaxjob = [
 	'peer',
 	'request',
 	'state',
+	'requestid',
 ];
 
 our $ajaxstatus = [
     'ajaxstatus' =>
+	'aidx',
 	'starttime',
+	'pid',
 	'ev',
      [[ 'watcher' =>
 	    'filename',
@@ -1060,6 +1107,11 @@ our $ajaxstatus = [
       [ 'joblist' =>
 	  [ $ajaxjob ],
       ],
+];
+
+our $ajaxstatuslist = [
+    'ajaxstatuslist' =>
+	[ $ajaxstatus ],
 ];
 
 our $serverstatus = [
@@ -1104,6 +1156,24 @@ our $schedulerstats = [
 	'lastpublished',
 ];
 
+our $buildresultinfo = [
+    'info' =>
+	'package',	# only in result query
+	[],
+	'workerid',
+	'hostarch',
+	'srcmd5',
+	'verifymd5',
+	'rev',
+	'vcs',
+	'file',
+	'buildtype',
+	'readytime',
+	'starttime',
+	'endtime',
+	'jobid',	# for repro builds
+];
+
 our $result = [
     'result' =>
 	'project',
@@ -1113,8 +1183,12 @@ our $result = [
 	'state', # old name of 'code', to be removed
 	'details',
 	'dirty', # marked for re-scheduling if element exists, state might not be correct anymore
+	[],
+	'scmsync',
+	'scminfo',
       [ $buildstatus ],
       [ $binarylist ],
+      [ $buildresultinfo ],
         $summary,
 	$schedulerstats,
 ];
@@ -1162,11 +1236,11 @@ our $pattern = [
 	'xmlns:rpm',  # obsolete, moved to patterns
 	[],
 	'name',
-    'arch',
+	'arch',
      [[ 'version' =>
-        'epoch',
-        'ver',
-        'rel',
+	    'epoch',
+	    'ver',
+	    'rel',
      ]],
      [[ 'summary' =>
 	    'lang',
@@ -1257,6 +1331,7 @@ our $binary_id = [
 	'baseproject',
 	'type',
 	'downloadurl',
+	'scmsyncurl',
 ];
 
 our $pattern_id = [
@@ -1273,10 +1348,21 @@ our $pattern_id = [
 ];
 
 our $repoinfo_id = [
-     'repoinfo' =>
+    'repoinfo' =>
 	'project',
 	'repository',
 	'downloadurl',
+];
+
+our $issues = [
+    'issues' =>
+	 [[ 'issue' =>
+		'state',
+		'tracker',
+		'name',
+		'label',
+		'url',
+	 ]]
 ];
 
 our $sourcediff = [
@@ -1317,15 +1403,7 @@ our $sourcediff = [
               ],
          ]],
       ],
-      [ 'issues' =>
-	 [[ 'issue' =>
-		'state',
-		'tracker',
-		'name',
-		'label',
-		'url',
-	 ]]
-      ],
+      $issues,
 ];
 
 our $request = [
@@ -1373,6 +1451,7 @@ our $request = [
           ],
           [ $sourcediff ],
      ]],
+     $issues,                # issues of request description
       [ 'submit' =>          # this is old style, obsolete by request, but still supported
 	  [ 'source' =>
 		'project',
@@ -1389,6 +1468,7 @@ our $request = [
 	    'name',
 	    'who',
 	    'when',
+	    'created',
 	    'approver',
 	    'superseded_by', # set when state.name is "superseded"
 	    [],
@@ -1405,13 +1485,13 @@ our $request = [
 	    'when',
 	    [],
 	    'comment',
-            [[ 'history' =>
-                   'who',
-                   'when',
-                   [],
-                   'comment',
-                   'description',
-            ]],
+	 [[ 'history' =>
+		'who',
+		'when',
+		[],
+		'comment',
+		'description',
+         ]],
      ]],
      [[ 'history' =>
 	    'name',
@@ -1488,42 +1568,42 @@ our $person = [
 	'email',
 	'realname',
       [ 'owner' =>
-                'userid',
-        ],
+	    'userid',
+      ],
 	'state',
       [ 'globalrole' ],
 	'ignore_auth_services',
       [ 'watchlist' =>
-		[[ 'project' =>
-			'name',
-		]],
-		[[ 'package' =>
-			'name',
-			'project'
-		]],
-		[[ 'request' =>
-			'number'
-		]],
+	 [[ 'project' =>
+		'name',
+	 ]],
+	 [[ 'package' =>
+		'name',
+		'project'
+	 ]],
+	 [[ 'request' =>
+		'number'
+	 ]],
       ],
 ];
 
 our $comps = [
     'comps' =>
      [[ 'group' =>
-	[],
-	'id',
+	    [],
+	    'id',
 	 [[ 'description' =>
-	    'xml:lang',
-	    '_content',
+		'xml:lang',
+		'_content',
 	 ]],
 	 [[ 'name' =>
-	    'xml:lang',
-	    '_content',
+		'xml:lang',
+		'_content',
 	 ]],
 	  [ 'packagelist' =>
 	     [[ 'packagereq' =>
-		'type',
-		'_content',
+		    'type',
+		    '_content',
 	     ]],
 	  ],
     ]],
@@ -1550,6 +1630,15 @@ our $services = [
                 '_content'
          ]],
     ]],
+];
+
+# list of used services configured in a project. It can contain links to other projects.
+our $services_link = [
+    'services' =>
+     [[ 'link' =>
+	    'project',
+     ]],
+         $services->[1],
 ];
 
 # service type definitions
@@ -1615,7 +1704,10 @@ our $updateinfoitem = [
 		    'release',
 		    'arch',
 		    'src',
-		    'supportstatus',	# extension
+		    # extensions for OBS internal only
+		    'embargo_date',
+		    'supportstatus',
+		    'superseded_by',
 		    [],
 		    'filename',
 		  [ 'sum' =>	# obsolete?
@@ -1628,7 +1720,9 @@ our $updateinfoitem = [
 	     ]],
 	 ]],
       ],
-	'patchinforef',			# extension, "project/package"
+        # extensions
+	'patchinforef',		# "project/package"
+	'blocked_in_product',   # filter in product builds
 ];
 
 our $updateinfo = [
@@ -1672,10 +1766,11 @@ our $prestodelta = [
 our $configuration = [
     'configuration' =>
 	[],
-	'title',        #webui only
-	'tos_url',      #webui only
-	'description',  #webui only
-	'name',         #obsname
+	'title',           #webui only
+	'tos_url',         #webui only
+	'code_of_conduct', #webui only
+	'description',     #webui only
+	'name',            #obsname
 	'anonymous',
 	'registration',
 	'default_access_disabled',
@@ -1704,8 +1799,8 @@ our $configuration = [
       [ 'schedulers' =>
 	  [ 'arch' ],
       ],
-  'unlisted_projects_filter',
-  'unlisted_projects_filter_description'
+	'unlisted_projects_filter',
+	'unlisted_projects_filter_description'
 ];
 
 our $issue_trackers = [
@@ -1804,11 +1899,11 @@ our @constraint = (
         [],
         '_content' # workers might get labels defined by admin, for example for benchmarking.
      ]],
-      [ 'sandbox' =>
+     [[ 'sandbox' =>
 	    'exclude',   # true or false. default is false.
 	    [],
 	    '_content' # xen/kvm/zvm/lxc/emulator/chroot/secure
-      ],
+     ]],
       [ 'linux' =>
 	  [ 'version' =>
 		[],
@@ -1881,6 +1976,7 @@ our $buildstatistics = [
 	    'cachehits',
 	    'preinstallimage',
       ],
+	$buildresultinfo,
 ];
 
 # This array is an outcome of following perl snippet
@@ -2011,7 +2107,10 @@ our $report = [
 	    'license',
 	    'binaryid',
 	    'supportstatus',
+	    'superseded_by',
 	    'cpeid',
+	    'summary',
+	    'isbase',
 
 	    'project',
 	    'repository',
@@ -2034,8 +2133,9 @@ our $publishedpath = [
 
 our $multibuild = [
     'multibuild' =>
-	  [ 'package' ],	# obsolete
-	  [ 'flavor' ],
+	'buildemptyflavor',
+      [ 'package' ],	# obsolete
+      [ 'flavor' ],
 ];
 
 our $pubkeyinfo = [
@@ -2061,6 +2161,7 @@ our $certinfo = [
 	'begins',
 	'expires',
 	'fingerprint',
+	'keyid',
 	'_content',
 ];
 
@@ -2083,6 +2184,10 @@ our $binannotation = [
 	'buildhost',
 	'disturl',
 	'binaryid',
+      [ 'installed' ],		# installed packages in containers
+	'registry_refname',	# in DoD containers
+	'registry_digest',	# in DoD containers
+	'registry_fatdigest',	# in DoD containers
 	'package',		# only in build job annotation
 	'epoch',		# only in build job annotation
 	'version',		# only in build job annotation
@@ -2105,34 +2210,6 @@ our $availablebinaries = [
 	  [ 'arch' ],
 	  [ 'name' ],
     ]],
-];
-
-our $clouduploadjob = [
-    'clouduploadjob' =>
-	'name',
-	[],
-	'state',		# created, receiving, scheduled, uploading, succeeded, waiting, failed
-	'details',		# error messages, upload result string
-	'progress',		# percentage completed
-	'try',			# retry count
-	'created',		# when was this job created
-
-	'user',			# who did this
-	'target',		# where to upload to
-
-	'project',
-	'repository',
-	'package',
-	'arch',
-	'filename',		# what to upload
-	'size',
-
-	'pid',		# internal
-];
-
-our $clouduploadjoblist = [
-    'clouduploadjoblist' =>
-      [ $clouduploadjob ],
 ];
 
 our $regrepoowner = [
