@@ -46,6 +46,7 @@ use BSDispatch;
 use BSXML;
 use Manifest;
 use Gitea;
+use GiteaEvent;
 
 use strict;
 
@@ -430,7 +431,7 @@ sub process_queue {
         rename($filepath, "$filepath.bad") or unlink($filepath);
         next;
       }
-      my $kind = Manifest::gitea_event_kind($batch);
+      my $kind = GiteaEvent::kind($batch);
       my $repository = ref($batch) eq 'HASH' ? $batch->{'repository'} : undef;
       my $fullname = ref($repository) eq 'HASH' ? $repository->{'full_name'} : undef;
       my $clone_url = ref($repository) eq 'HASH' ? $repository->{'clone_url'} : undef;
@@ -650,7 +651,7 @@ sub setup_branch_project {
 sub handle_repo_rename {
   my ($batch, $fullname, $clone_url) = @_;
   return 1 unless defined $autosetup_prefix;
-  my $old_fullname = Manifest::event_old_fullname($batch);
+  my $old_fullname = GiteaEvent::old_fullname($batch);
   if (!defined($old_fullname)) {
     print "repo_rename: cannot determine the old name of $fullname, keeping the OBS projects\n";
     return 1;
@@ -1269,10 +1270,10 @@ sub repositoryevent {
   my $hevent = BSServer::header('x-gitea-event');
   my $batch = eval { JSON::XS::decode_json($batch_json) };
   # log every incoming event before anything else may abort the handling
-  print Manifest::event_logline($batch, $hevent);
+  print GiteaEvent::logline($batch, $hevent);
   die("no event data given\n") unless ref($batch) eq 'HASH';
   $batch->{'event'} = $hevent if defined($hevent) && !defined($batch->{'event'});
-  my $kind = Manifest::gitea_event_kind($batch);
+  my $kind = GiteaEvent::kind($batch);
   # events which do not concern us are acknowledged without being queued
   if (!defined($kind)) {
     return (JSON::XS::encode_json({ answer => 'ignored' }), 'Content-Type: application/json');
